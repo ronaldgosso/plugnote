@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plugnote_app
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://plugnote_user:plugnote_password@db:5432/plugnote_db?schema=public
+      - ENCRYPTION_KEY=8d2f62772f913d8d67c4ec94b30ae0fe3298c56fa8f3214e30ee1d622f9810a4
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - NODE_ENV=production
+    depends_on:
+      - db
+
+  db:
+    image: postgres:15-alpine
+    container_name: plugnote_db
+    restart: always
+    environment:
+      - POSTGRES_USER=plugnote_user
+      - POSTGRES_PASSWORD=plugnote_password
+      - POSTGRES_DB=plugnote_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
