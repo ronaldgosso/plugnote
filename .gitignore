@@ -1,0 +1,45 @@
+# Dependency directories
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Production builds
+build/
+dist/
+
+# Local databases and SQLite journals
+*.db
+*.db-journal
+dev.db
+dev.db-journal
+/prisma/dev.db
+/prisma/dev.db-journal
+
+# Environment variables containing sensitive keys
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# System files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Editor configs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
