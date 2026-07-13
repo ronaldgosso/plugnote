@@ -90,9 +90,7 @@ export default async function RootLayout({
               }}
               suppressHydrationWarning
             >
-              {/* Glow dot */}
-              <span className="glow-dot" />
-              <Sparkles className="h-3.5 w-3.5 text-violet-400" />
+<Sparkles className="h-3.5 w-3.5 text-violet-400" />
               <span className="text-violet-300">Powered by AI</span>
             </div>
           </div>
