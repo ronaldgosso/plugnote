@@ -4,7 +4,8 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import {
   Plus, MessageSquare, Trash2, Edit2, Send, Sparkles, Settings, Play, Pause,
   FileText, Music2, AlertTriangle, Menu, X, ArrowUpRight,
-  HelpCircle, Star, PanelLeftOpen, PanelLeftClose, ExternalLink
+  HelpCircle, Star, PanelLeftOpen, PanelLeftClose, ExternalLink,
+  Headphones, Search, Library
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { readStreamableValue } from "ai/rsc";
@@ -17,6 +18,13 @@ import { fetchTrackDetailsAction } from "@/app/actions/music";
 import { reactToMessage } from "@/app/actions/reactions";
 import { PROVIDERS_INFO, ProviderId } from "@/lib/ai";
 import { createVisualizer, drawVisualizer, type Visualizer } from "@/lib/visualizer";
+
+declare global {
+  interface Window {
+    onYouTubeIframeAPIReady?: () => void;
+    YT?: any;
+  }
+}
 
 interface Conversation {
   id: string;
@@ -217,6 +225,17 @@ export default function ChatContainer({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
+  // Navigation & Library View Modes
+  const [viewMode, setViewMode] = useState<"chat" | "library">("chat");
+  const [libraryTracks, setLibraryTracks] = useState<any[]>([]);
+  const [loadingLibrary, setLoadingLibrary] = useState(false);
+  const [libraryFilterMood, setLibraryFilterMood] = useState<string>("all");
+  const [libraryGroupBy, setLibraryGroupBy] = useState<"recent" | "mood" | "artist" | "all">("recent");
+  const [ytPlayerReady, setYtPlayerReady] = useState(false);
+
+  // YouTube Player Ref
+  const ytPlayerRef = useRef<any>(null);
+
   // Rename states
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
@@ -264,6 +283,29 @@ export default function ChatContainer({
   const timeUpdateHandlerRef = useRef<(() => void) | null>(null);
   // LRC lines ref (avoids stale closure in the timeupdate handler)
   const lrcLinesRef = useRef<LrcLine[] | null>(null);
+
+  // ── Stop helper — tears down audio + visualizer cleanly
+  const stopAudio = useCallback(() => {
+    if (audioRef.current) {
+      if (timeUpdateHandlerRef.current) {
+        audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
+        timeUpdateHandlerRef.current = null;
+      }
+      audioRef.current.pause();
+    }
+    if (ytPlayerRef.current && typeof ytPlayerRef.current.stopVideo === "function") {
+      try {
+        ytPlayerRef.current.stopVideo();
+      } catch (err) {
+        console.warn("Error stopping YouTube playback", err);
+      }
+    }
+    if (lyricsIntervalRef.current) { clearInterval(lyricsIntervalRef.current); lyricsIntervalRef.current = null; }
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    if (visualizerRef.current) { visualizerRef.current.cleanup(); visualizerRef.current = null; }
+    setPlayingTrackId(null);
+    lrcLinesRef.current = null;
+  }, []);
 
   // Auto-scroll to bottom of chat — via RAF to avoid layout thrash
   useEffect(() => {
@@ -331,6 +373,77 @@ export default function ChatContainer({
     
     return () => clearInterval(interval);
   }, []);
+
+  // Load YouTube Player API SDK on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && !window.YT) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      const firstScriptTag = document.getElementsByTagName("script")[0];
+      firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
+
+      window.onYouTubeIframeAPIReady = () => {
+        setYtPlayerReady(true);
+      };
+    } else if (window.YT) {
+      setYtPlayerReady(true);
+    }
+  }, []);
+
+  // Initialize YouTube Iframe Player
+  const initYoutubePlayer = useCallback(() => {
+    if (!window.YT || ytPlayerRef.current) return;
+    try {
+      ytPlayerRef.current = new window.YT.Player("youtube-player", {
+        height: "0",
+        width: "0",
+        playerVars: {
+          autoplay: 0,
+          controls: 0,
+          disablekb: 1,
+          fs: 0,
+          modestbranding: 1,
+          rel: 0,
+          showinfo: 0,
+        },
+        events: {
+          onStateChange: (event: any) => {
+            if (event.data === window.YT.PlayerState.ENDED) {
+              stopAudio();
+            }
+          },
+        },
+      });
+    } catch (err) {
+      console.error("[YouTube Iframe Player Initialization failed]", err);
+    }
+  }, [stopAudio]);
+
+  useEffect(() => {
+    if (ytPlayerReady) {
+      initYoutubePlayer();
+    }
+  }, [ytPlayerReady, initYoutubePlayer]);
+
+  // Load discovered library tracks
+  const loadLibraryTracks = useCallback(async () => {
+    setLoadingLibrary(true);
+    try {
+      const { getDiscoveredTracks } = await import("@/app/actions/library");
+      const tracks = await getDiscoveredTracks();
+      setLibraryTracks(tracks);
+    } catch (err) {
+      console.error("Failed to load library tracks", err);
+    } finally {
+      setLoadingLibrary(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (viewMode === "library") {
+      loadLibraryTracks();
+    }
+  }, [viewMode, loadLibraryTracks]);
 
   // Filter available providers based on trial or user keys — memoized
   const availableProviders = useMemo(() =>
@@ -445,21 +558,7 @@ export default function ChatContainer({
     });
   }, [messages, extractTracks, loadTrackData]);
 
-  // ── Stop helper — tears down audio + visualizer cleanly
-  const stopAudio = useCallback(() => {
-    if (audioRef.current) {
-      if (timeUpdateHandlerRef.current) {
-        audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
-        timeUpdateHandlerRef.current = null;
-      }
-      audioRef.current.pause();
-    }
-    if (lyricsIntervalRef.current) { clearInterval(lyricsIntervalRef.current); lyricsIntervalRef.current = null; }
-    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-    if (visualizerRef.current) { visualizerRef.current.cleanup(); visualizerRef.current = null; }
-    setPlayingTrackId(null);
-    lrcLinesRef.current = null;
-  }, []);
+
 
   // Play audio snippet — starts Web Audio visualizer and triggers embedded lyrics sync
   const handlePlayPreview = async (artist: string, title: string, previewUrl: string | null) => {
@@ -471,56 +570,107 @@ export default function ChatContainer({
       return;
     }
 
-    if (!previewUrl) return;
-
     // Tear down previous audio + visualizer
     stopAudio();
+    setPlayingTrackId(trackId);
+
+    // Synchronize lyrics container context
+    const details = trackDetails[trackId];
+    const lrcLines = details ? (details.lrcLines || (details.syncedLyrics ? parseLrc(details.syncedLyrics) : null)) : null;
+    lrcLinesRef.current = lrcLines;
+    setActiveLyricLine(0);
+
+    // Attempt YouTube Search to play full audio track
+    let youtubeId: string | null = null;
+    try {
+      const { searchYouTubeAction } = await import("@/app/actions/library");
+      youtubeId = await searchYouTubeAction(artist, title);
+    } catch (err) {
+      console.warn("YouTube search API unavailable, falling back to iTunes preview.", err);
+    }
+
+    if (youtubeId && ytPlayerRef.current && typeof ytPlayerRef.current.loadVideoById === "function") {
+      try {
+        ytPlayerRef.current.loadVideoById(youtubeId);
+        ytPlayerRef.current.playVideo();
+
+        // Start simulated rhythm visualizer
+        if (canvasRef.current) {
+          drawVisualizer(null, canvasRef.current, rafRef);
+        }
+
+        // Setup polling interval to sync lyrics with YouTube currentTime
+        if (lrcLines && lrcLines.length > 0) {
+          lyricsIntervalRef.current = setInterval(() => {
+            if (!ytPlayerRef.current || typeof ytPlayerRef.current.getCurrentTime !== "function") return;
+            const nowMs = ytPlayerRef.current.getCurrentTime() * 1000;
+            let idx = 0;
+            for (let i = 0; i < lrcLines.length; i++) {
+              if (lrcLines[i].time <= nowMs) idx = i;
+              else break;
+            }
+            setActiveLyricLine(idx);
+          }, 200);
+        } else if (details?.lyrics) {
+          const lineCount = details.lyrics.split("\n").filter(Boolean).length;
+          lyricsIntervalRef.current = setInterval(() => {
+            setActiveLyricLine((prev) => {
+              if (prev >= lineCount - 1) {
+                if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
+                return prev;
+              }
+              return prev + 1;
+            });
+          }, 2500);
+        }
+        return; // YouTube stream started successfully
+      } catch (err) {
+        console.error("YouTube playback error, executing iTunes fallback.", err);
+      }
+    }
+
+    // Fallback: Play 30s iTunes Preview
+    if (!previewUrl) {
+      stopAudio();
+      return;
+    }
 
     const proxiedUrl = `/api/audio-proxy?url=${encodeURIComponent(previewUrl)}`;
     const audio = new Audio(proxiedUrl);
     audio.crossOrigin = "anonymous"; // required for AudioContext CORS
     audioRef.current = audio;
-    setPlayingTrackId(trackId);
 
-    // Start Web Audio visualizer after user gesture (play button click)
+    // Start Web Audio visualizer
     const viz = createVisualizer(audio);
     visualizerRef.current = viz;
     if (viz && canvasRef.current) {
       drawVisualizer(viz.analyser, canvasRef.current, rafRef);
     }
 
-    // Set up synced lyrics for the playing song (embed mode)
-    const details = trackDetails[trackId];
-    if (details) {
-      const lrcLines = details.lrcLines || (details.syncedLyrics ? parseLrc(details.syncedLyrics) : null);
-      lrcLinesRef.current = lrcLines;
-      setActiveLyricLine(0);
-
-      if (lrcLines && lrcLines.length > 0) {
-        const handler = () => {
-          if (!audioRef.current || !lrcLinesRef.current) return;
-          const nowMs = audioRef.current.currentTime * 1000;
-          let idx = 0;
-          for (let i = 0; i < lrcLinesRef.current.length; i++) {
-            if (lrcLinesRef.current[i].time <= nowMs) idx = i;
-            else break;
+    if (lrcLines && lrcLines.length > 0) {
+      const handler = () => {
+        if (!audioRef.current || !lrcLinesRef.current) return;
+        const nowMs = audioRef.current.currentTime * 1000;
+        let idx = 0;
+        for (let i = 0; i < lrcLinesRef.current.length; i++) {
+          if (lrcLinesRef.current[i].time <= nowMs) idx = i;
+          else break;
+        }
+        setActiveLyricLine(idx);
+      };
+      timeUpdateHandlerRef.current = handler;
+      audio.addEventListener("timeupdate", handler);
+    } else if (details?.lyrics) {
+      const lineCount = details.lyrics.split("\n").filter(Boolean).length;
+      lyricsIntervalRef.current = setInterval(() => {
+        setActiveLyricLine((prev) => {
+          if (prev >= lineCount - 1) {
+            if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
+            return prev;
           }
-          setActiveLyricLine(idx);
-        };
-        timeUpdateHandlerRef.current = handler;
-        audio.addEventListener("timeupdate", handler);
-      } else if (details.lyrics) {
-        const lineCount = details.lyrics.split("\n").filter(Boolean).length;
-        lyricsIntervalRef.current = setInterval(() => {
-          setActiveLyricLine((prev) => {
-            if (prev >= lineCount - 1) {
-              if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
-              return prev;
-            }
-            return prev + 1;
-          });
-        }, 2500);
-      }
+          return prev + 1;
+        });
+      }, 2500);
     }
 
     audio.play().catch((err) => {
@@ -552,6 +702,7 @@ export default function ChatContainer({
   // Select a conversation from sidebar
   const handleSelectConversation = async (id: string) => {
     setActiveId(id);
+    setViewMode("chat");
     setStreamingMessage("");
     setSidebarOpen(false);
     router.push(`/?c=${id}`);
@@ -572,6 +723,7 @@ export default function ChatContainer({
   const handleNewChat = async () => {
     try {
       const newConv = await createConversation("New Conversation", selectedProvider);
+      setViewMode("chat");
       setConversations((prev) => [
         { 
           id: newConv.id,
@@ -751,6 +903,41 @@ export default function ChatContainer({
     }
   };
 
+  // Group library tracks by Artist
+  const groupedByArtist = useMemo(() => {
+    const groups: Record<string, any[]> = {};
+    libraryTracks.forEach((t) => {
+      if (libraryFilterMood !== "all" && t.mood !== libraryFilterMood) return;
+      const artistName = t.artist;
+      if (!groups[artistName]) {
+        groups[artistName] = [];
+      }
+      groups[artistName].push(t);
+    });
+    return groups;
+  }, [libraryTracks, libraryFilterMood]);
+
+  // Group library tracks by mood
+  const groupedByMood = useMemo(() => {
+    const groups: Record<string, any[]> = {};
+    libraryTracks.forEach((t) => {
+      if (libraryFilterMood !== "all" && t.mood !== libraryFilterMood) return;
+      const moodLabel = t.mood.charAt(0).toUpperCase() + t.mood.slice(1);
+      if (!groups[moodLabel]) {
+        groups[moodLabel] = [];
+      }
+      groups[moodLabel].push(t);
+    });
+    return groups;
+  }, [libraryTracks, libraryFilterMood]);
+
+  // Top 8 recently discovered tracks
+  const recentTracks = useMemo(() => {
+    return [...libraryTracks]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 8);
+  }, [libraryTracks]);
+
   const isTrialExceeded = selectedProvider === "trial_mistral" && currentTrialStatus.used >= currentTrialStatus.limit;
 
   return (
@@ -772,21 +959,58 @@ export default function ChatContainer({
         <div className="flex flex-col h-full overflow-hidden">
 
           {/* Sidebar Header — New Chat + Collapse */}
-          <div className="p-3 flex items-center gap-2"
+          <div className="p-3 flex flex-col gap-2"
             style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleNewChat}
+                className="flex-1 btn-primary-tactile text-white rounded-xl py-2.5 px-3 flex items-center justify-center gap-2 text-sm font-semibold"
+              >
+                <Plus className="h-4 w-4" />
+                <span className="truncate">New Chat</span>
+              </button>
+              <button
+                onClick={() => setSidebarCollapsed(true)}
+                className="p-2.5 rounded-xl text-zinc-500 hover:text-zinc-300 transition-colors hidden md:flex items-center justify-center btn-tactile"
+                title="Collapse sidebar"
+              >
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
+            </div>
+            
+            {/* Library Toggle button */}
             <button
-              onClick={handleNewChat}
-              className="flex-1 btn-primary-tactile text-white rounded-xl py-2.5 px-3 flex items-center justify-center gap-2 text-sm font-semibold"
+              onClick={() => {
+                setViewMode(viewMode === "chat" ? "library" : "chat");
+                if (viewMode === "chat") {
+                  if (conversations.length > 0) {
+                    handleSelectConversation(conversations[0].id);
+                  }
+                } else {
+                  setActiveId(undefined);
+                }
+              }}
+              className="w-full text-left flex items-center justify-between rounded-xl px-3 py-2 cursor-pointer transition-all duration-300"
+              style={viewMode === "library" ? {
+                background: "linear-gradient(135deg, rgba(139,92,246,0.18) 0%, rgba(109,40,217,0.08) 100%)",
+                border: "1px solid rgba(139,92,246,0.3)",
+                boxShadow: "0 0 16px rgba(139,92,246,0.15), inset 0 1px 0 rgba(139,92,246,0.2)",
+                color: "white",
+              } : {
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.06)",
+                color: "#a1a1aa",
+              }}
             >
-              <Plus className="h-4 w-4" />
-              <span className="truncate">New Chat</span>
-            </button>
-            <button
-              onClick={() => setSidebarCollapsed(true)}
-              className="p-2.5 rounded-xl text-zinc-500 hover:text-zinc-300 transition-colors hidden md:flex items-center justify-center btn-tactile"
-              title="Collapse sidebar"
-            >
-              <PanelLeftClose className="h-4 w-4" />
+              <div className="flex items-center gap-2">
+                <div className={`h-6 w-6 rounded-lg flex items-center justify-center shrink-0 transition-all ${
+                  viewMode === "library" ? "bg-violet-600/30" : "bg-zinc-800/40"
+                }`}>
+                  <Library className={`h-3.5 w-3.5 ${viewMode === "library" ? "text-violet-400" : "text-zinc-500"}`} />
+                </div>
+                <span className="text-xs font-semibold">Discovered Library</span>
+              </div>
+              <span className="text-[9px] font-mono opacity-50 px-1 py-0.5 rounded bg-black/40 text-zinc-400">Library</span>
             </button>
           </div>
 
@@ -985,34 +1209,42 @@ export default function ChatContainer({
             )}
             <div>
               <h1 className="text-sm font-bold text-zinc-200 tracking-tight">
-                {activeId ? conversations.find(c => c.id === activeId)?.title : "New Music Session"}
+                {viewMode === "library"
+                  ? "Discovered Library"
+                  : activeId
+                  ? conversations.find((c) => c.id === activeId)?.title
+                  : "New Music Session"}
               </h1>
               <p className="text-[9px] font-mono uppercase tracking-[0.15em] text-zinc-600 mt-0.5">
-                {PROVIDERS_INFO[selectedProvider as ProviderId]?.name || selectedProvider}
+                {viewMode === "library"
+                  ? "All Recommended Tracks"
+                  : PROVIDERS_INFO[selectedProvider as ProviderId]?.name || selectedProvider}
               </p>
             </div>
           </div>
           
           <div className="flex items-center gap-2">
             {/* Model selector */}
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl" style={{
-              background: "#0f0f12",
-              border: "1px solid rgba(255,255,255,0.06)",
-              boxShadow: "inset 0 1px 3px rgba(0,0,0,0.5)",
-            }}>
-              <span className="text-[10px] text-zinc-600 font-mono uppercase tracking-wider">Model</span>
-              <select
-                value={selectedProvider}
-                onChange={(e) => setSelectedProvider(e.target.value)}
-                className="bg-transparent border-none text-xs text-violet-400 font-semibold focus:outline-none cursor-pointer"
-              >
-                {availableProviders.map(([id, info]) => (
-                  <option key={id} value={id} className="bg-zinc-900 text-zinc-300">
-                    {info.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {viewMode !== "library" && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl" style={{
+                background: "#0f0f12",
+                border: "1px solid rgba(255,255,255,0.06)",
+                boxShadow: "inset 0 1px 3px rgba(0,0,0,0.5)",
+              }}>
+                <span className="text-[10px] text-zinc-600 font-mono uppercase tracking-wider">Model</span>
+                <select
+                  value={selectedProvider}
+                  onChange={(e) => setSelectedProvider(e.target.value)}
+                  className="bg-transparent border-none text-xs text-violet-400 font-semibold focus:outline-none cursor-pointer"
+                >
+                  {availableProviders.map(([id, info]) => (
+                    <option key={id} value={id} className="bg-zinc-900 text-zinc-300">
+                      {info.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <a
               href="/settings"
               className="p-2 rounded-xl text-zinc-500 hover:text-zinc-300 transition-colors btn-tactile"
@@ -1023,8 +1255,537 @@ export default function ChatContainer({
           </div>
         </div>
 
-        {/* ─── Messages Viewport ─────────────────────────────────── */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6 space-y-5">
+        {/* ─── Discovered Library View ──────────────────────────── */}
+        {viewMode === "library" ? (
+          <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6 space-y-6" style={{ background: "var(--background)" }}>
+              
+              {/* Premium Dashboard Header & Tabs */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl"
+                style={{
+                  background: "linear-gradient(180deg, #13131a 0%, #0d0d12 100%)",
+                  border: "1px solid rgba(255,255,255,0.04)",
+                  boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+                }}>
+                
+                {/* Main Navigation Tabs */}
+                <div className="flex items-center gap-1.5 p-1.5 rounded-xl bg-zinc-950/60 border border-white/5">
+                  {[
+                    { id: "recent", label: "Recently Discovered" },
+                    { id: "mood", label: "Moods" },
+                    { id: "artist", label: "Artists" },
+                    { id: "all", label: "All Tracks" }
+                  ].map((tab) => {
+                    const isActive = libraryGroupBy === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        onClick={() => {
+                          setLibraryGroupBy(tab.id as any);
+                          if (tab.id !== "mood") setLibraryFilterMood("all");
+                        }}
+                        className="px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all duration-300"
+                        style={isActive ? {
+                          background: "linear-gradient(135deg, #7c3aed, #db2777)",
+                          boxShadow: "0 0 12px rgba(139,92,246,0.3)",
+                          color: "white",
+                        } : {
+                          color: "#71717a",
+                        }}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Counter */}
+                <div className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider pl-1">
+                  Total Discovered: <span className="font-semibold text-violet-400">{libraryTracks.length}</span>
+                </div>
+              </div>
+
+              {/* Loader */}
+              {loadingLibrary ? (
+                <div className="flex items-center justify-center py-20">
+                  <span className="w-8 h-8 border-4 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : libraryTracks.length === 0 ? (
+                <div className="max-w-md mx-auto text-center py-20 space-y-4">
+                  <div className="h-16 w-16 mx-auto rounded-2xl flex items-center justify-center"
+                    style={{
+                      background: "linear-gradient(135deg, rgba(139,92,246,0.1), rgba(219,39,119,0.1))",
+                      border: "1px solid rgba(139,92,246,0.2)",
+                    }}>
+                    <Music2 className="h-8 w-8 text-violet-400" />
+                  </div>
+                  <h3 className="text-zinc-200 font-bold text-sm">Library is empty</h3>
+                  <p className="text-zinc-600 text-xs leading-relaxed">
+                    Start chatting with Plugnote AI and request recommendations! Any suggested songs will automatically appear here.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-8 animate-slide-in-up">
+                  
+                  {/* ───────────────── RECENT VIEW ───────────────── */}
+                  {libraryGroupBy === "recent" && (
+                    <div className="space-y-6">
+                      
+                      {/* Recently Discovered Carousel */}
+                      <div className="space-y-3">
+                        <h3 className="text-xs font-bold font-mono uppercase tracking-[0.2em] text-violet-400 pl-1">
+                          Recently Discovered
+                        </h3>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                          {recentTracks.map((track) => {
+                            const trackKey = `${track.artist.toLowerCase()}||${track.title.toLowerCase()}`;
+                            const isPlaying = playingTrackId === trackKey;
+                            const details = trackDetails[trackKey];
+                            
+                            return (
+                              <div
+                                key={track.id}
+                                className="group relative rounded-2xl p-4 flex flex-col gap-3 transition-all duration-300 border border-white/5"
+                                style={{
+                                  background: "linear-gradient(180deg, #13131e 0%, #0d0d14 100%)",
+                                }}
+                              >
+                                {/* Cover Art Area */}
+                                <div className="relative aspect-square w-full rounded-xl overflow-hidden shadow-lg shadow-black/50">
+                                  {track.coverArtUrl ? (
+                                    <img src={track.coverArtUrl} alt={track.title} className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-500" />
+                                  ) : (
+                                    <div className="h-full w-full flex items-center justify-center bg-zinc-900">
+                                      <Music2 className="h-10 w-10 text-zinc-800" />
+                                    </div>
+                                  )}
+                                  
+                                  {/* Play Overlay Button */}
+                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-all duration-300">
+                                    <button
+                                      onClick={() => handlePlayPreview(track.artist, track.title, track.previewUrl)}
+                                      className="h-12 w-12 rounded-full flex items-center justify-center bg-violet-600 text-white shadow-xl hover:scale-105 transition-transform"
+                                    >
+                                      {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 ml-0.5" />}
+                                    </button>
+                                  </div>
+
+                                  {/* Spinning Vinyl Record Badge */}
+                                  {isPlaying && (
+                                    <div className="absolute top-2 right-2 h-6 w-6 rounded-full bg-black/80 flex items-center justify-center animate-spin" style={{ animationDuration: "3s" }}>
+                                      <div className="h-2 w-2 rounded-full bg-pink-500" />
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Track Text */}
+                                <div className="min-w-0">
+                                  <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
+                                  <p className="text-[10px] text-zinc-400 font-medium truncate mt-0.5">{track.artist}</p>
+                                  <p className="text-[8px] font-mono text-zinc-600 mt-1 uppercase tracking-wider">{track.mood} mood</p>
+                                </div>
+
+                                {/* Inline Lyrics when active in carousel */}
+                                {isPlaying && details && (
+                                  <div className="mt-2 p-2 rounded-xl border border-violet-500/20 bg-black/40 max-h-[100px] overflow-y-auto" style={{ scrollbarWidth: "none" }}>
+                                    {details.lrcLines && details.lrcLines.length > 0 ? (
+                                      <p className="text-[10px] text-violet-400 font-semibold text-center py-2">
+                                        {details.lrcLines[activeLyricLine]?.text}
+                                      </p>
+                                    ) : details.lyrics ? (
+                                      <p className="text-[10px] text-violet-400 font-semibold text-center py-2 truncate">
+                                        {details.lyrics.split("\n").filter(Boolean)[activeLyricLine] || "Playing..."}
+                                      </p>
+                                    ) : (
+                                      <p className="text-[9px] text-zinc-600 italic text-center py-2">Playing...</p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Mood Collections Grid */}
+                      <div className="space-y-3 pt-4">
+                        <h3 className="text-xs font-bold font-mono uppercase tracking-[0.2em] text-violet-400 pl-1">
+                          Mood Playlists
+                        </h3>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+                          {[
+                            { id: "chill", name: "Chill Out", gradient: "from-cyan-900 to-blue-950", border: "rgba(6,182,212,0.2)" },
+                            { id: "energetic", name: "High Energy", gradient: "from-amber-900 to-red-950", border: "rgba(249,115,22,0.2)" },
+                            { id: "focused", name: "Focus Zone", gradient: "from-emerald-900 to-teal-950", border: "rgba(16,185,129,0.2)" },
+                            { id: "melancholic", name: "Deep Emotions", gradient: "from-indigo-900 to-slate-950", border: "rgba(99,102,241,0.2)" },
+                            { id: "mystical", name: "Ethereal Journeys", gradient: "from-fuchsia-900 to-purple-950", border: "rgba(217,70,239,0.2)" }
+                          ].map((mood) => {
+                            const trackCount = libraryTracks.filter(t => t.mood === mood.id).length;
+                            return (
+                              <button
+                                key={mood.id}
+                                onClick={() => {
+                                  setLibraryGroupBy("mood");
+                                  setLibraryFilterMood(mood.id);
+                                }}
+                                className="group relative rounded-2xl p-5 flex flex-col items-center justify-center text-center transition-all duration-300 hover:-translate-y-1"
+                                style={{
+                                  background: `linear-gradient(135deg, ${mood.border.replace("0.2", "0.08")} 0%, rgba(0,0,0,0.4) 100%)`,
+                                  border: `1px solid ${mood.border}`,
+                                  boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+                                }}
+                              >
+                                <div className="h-10 w-10 rounded-full flex items-center justify-center mb-3 bg-white/5" style={{ border: `1px solid ${mood.border}` }}>
+                                  <Library className="h-5 w-5 text-violet-400 group-hover:scale-110 transition-transform" />
+                                </div>
+                                <h4 className="text-xs font-bold text-zinc-100">{mood.name}</h4>
+                                <span className="text-[9px] font-mono uppercase tracking-wider text-zinc-500 mt-1">{trackCount} songs</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ───────────────── MOOD VIEW ───────────────── */}
+                  {libraryGroupBy === "mood" && (
+                    <div className="space-y-6">
+                      {/* Mood Sub-Filter Pills */}
+                      <div className="flex items-center gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+                        {["all", "chill", "energetic", "focused", "melancholic", "mystical"].map((m) => {
+                          const isActive = libraryFilterMood === m;
+                          return (
+                            <button
+                              key={m}
+                              onClick={() => setLibraryFilterMood(m)}
+                              className="px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all duration-300"
+                              style={isActive ? {
+                                background: "linear-gradient(135deg, #7c3aed, #db2777)",
+                                color: "white",
+                              } : {
+                                background: "rgba(255,255,255,0.02)",
+                                border: "1px solid rgba(255,255,255,0.05)",
+                                color: "#71717a",
+                              }}
+                            >
+                              {m}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Display flat grid of matching tracks */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        {libraryTracks
+                          .filter(t => libraryFilterMood === "all" || t.mood === libraryFilterMood)
+                          .map((track) => {
+                            const trackKey = `${track.artist.toLowerCase()}||${track.title.toLowerCase()}`;
+                            const isPlaying = playingTrackId === trackKey;
+                            const details = trackDetails[trackKey];
+                            const isLoading = loadingTrack[trackKey] || false;
+
+                            return (
+                              <div
+                                key={track.id}
+                                className="track-card-sleeve rounded-2xl p-3 flex flex-col gap-3 border border-white/5"
+                                style={{
+                                  background: isPlaying ? "linear-gradient(180deg, #101018 0%, #0a0a0f 100%)" : "linear-gradient(180deg, #15151e 0%, #0d0d14 100%)",
+                                }}
+                              >
+                                <div className="flex items-center justify-between gap-3 w-full">
+                                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                                    <div className="relative h-14 w-14 rounded-xl shrink-0 overflow-visible">
+                                      <div className="absolute inset-0 rounded-xl overflow-hidden z-10 bg-zinc-950 border border-white/10">
+                                        {track.coverArtUrl ? (
+                                          <img src={track.coverArtUrl} alt={track.title} className="h-full w-full object-cover" />
+                                        ) : (
+                                          <div className="h-full w-full flex items-center justify-center bg-zinc-900">
+                                            <Music2 className="h-5 w-5 text-zinc-700" />
+                                          </div>
+                                        )}
+                                      </div>
+                                      <div className="absolute top-0 right-0 h-14 w-14 rounded-full bg-zinc-950 z-0 transition-transform duration-700"
+                                        style={{
+                                          background: "repeating-radial-gradient(circle, #101010, #101010 2px, #0b0b0b 3px, #0b0b0b 4px)",
+                                          transform: isPlaying ? "translateX(24px) rotate(180deg)" : "translateX(0px)",
+                                        }}>
+                                        <div className="absolute inset-4 rounded-full border border-white/5 flex items-center justify-center bg-gradient-to-tr from-violet-600 to-pink-600">
+                                          <div className="h-2 w-2 rounded-full bg-zinc-950" />
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    <div className="min-w-0 flex-1 ml-5">
+                                      <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
+                                      <p className="text-[10px] text-zinc-400 font-medium truncate mt-0.5">{track.artist}</p>
+                                      <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-violet-950/40 text-violet-400 border border-violet-500/10 uppercase tracking-wider mt-1.5 inline-block">{track.mood}</span>
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    onClick={() => handlePlayPreview(track.artist, track.title, track.previewUrl)}
+                                    className={`h-8 w-8 rounded-xl flex items-center justify-center transition-all ${
+                                      isPlaying ? "bg-pink-600 text-white" : "bg-zinc-800 text-zinc-300 hover:text-white"
+                                    }`}
+                                  >
+                                    {isLoading ? (
+                                      <span className="w-3.5 h-3.5 border-2 border-t-transparent border-white rounded-full animate-spin" />
+                                    ) : isPlaying ? (
+                                      <Pause className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <Play className="h-3.5 w-3.5 ml-0.5" />
+                                    )}
+                                  </button>
+                                </div>
+
+                                {isPlaying && details && (
+                                  <div className="mt-3 p-3.5 rounded-xl border border-violet-500/20 bg-black/40 overflow-hidden">
+                                    <div 
+                                      ref={lyricsScrollRef}
+                                      className="overflow-y-auto px-1 max-h-[120px] space-y-1 select-none scrollbar-none"
+                                    >
+                                      {details.lrcLines && details.lrcLines.length > 0 ? (
+                                        <div className="py-6 space-y-0.5">
+                                          {details.lrcLines.map((line, idx) => (
+                                            <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                              {line.text}
+                                            </p>
+                                          ))}
+                                        </div>
+                                      ) : details.lyrics ? (
+                                        <div className="py-6 space-y-0.5">
+                                          {details.lyrics.split("\n").filter(Boolean).map((line, idx) => (
+                                            <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                              {line}
+                                            </p>
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <p className="text-[10px] text-zinc-600 italic text-center py-4">No lyrics loaded.</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ───────────────── ARTIST VIEW ───────────────── */}
+                  {libraryGroupBy === "artist" && (
+                    <div className="space-y-8">
+                      {Object.entries(groupedByArtist)
+                        .filter(([_, tracks]) => tracks.length > 0)
+                        .map(([artistName, tracks]) => (
+                          <div key={artistName} className="space-y-3">
+                            <h4 className="text-xs font-bold font-mono uppercase tracking-[0.2em] text-violet-400 pl-1 flex items-center gap-2">
+                              <span className="h-1.5 w-1.5 rounded-full bg-pink-500 animate-pulse" />
+                              {artistName}
+                              <span className="text-[10px] opacity-40 font-normal font-sans tracking-normal">({tracks.length} tracks)</span>
+                            </h4>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                              {tracks.map((track) => {
+                                const trackKey = `${track.artist.toLowerCase()}||${track.title.toLowerCase()}`;
+                                const isPlaying = playingTrackId === trackKey;
+                                const details = trackDetails[trackKey];
+                                const isLoading = loadingTrack[trackKey] || false;
+
+                                return (
+                                  <div
+                                    key={track.id}
+                                    className="track-card-sleeve rounded-2xl p-3 flex flex-col gap-3 border border-white/5"
+                                    style={{
+                                      background: isPlaying ? "linear-gradient(180deg, #101018 0%, #0a0a0f 100%)" : "linear-gradient(180deg, #15151e 0%, #0d0d14 100%)",
+                                    }}
+                                  >
+                                    <div className="flex items-center justify-between gap-3 w-full">
+                                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                                        <div className="relative h-14 w-14 rounded-xl shrink-0 overflow-visible">
+                                          <div className="absolute inset-0 rounded-xl overflow-hidden z-10 bg-zinc-950 border border-white/10">
+                                            {track.coverArtUrl ? (
+                                              <img src={track.coverArtUrl} alt={track.title} className="h-full w-full object-cover" />
+                                            ) : (
+                                              <div className="h-full w-full flex items-center justify-center bg-zinc-900">
+                                                <Music2 className="h-5 w-5 text-zinc-700" />
+                                              </div>
+                                            )}
+                                          </div>
+                                          <div className="absolute top-0 right-0 h-14 w-14 rounded-full bg-zinc-950 z-0 transition-transform duration-700"
+                                            style={{
+                                              background: "repeating-radial-gradient(circle, #101010, #101010 2px, #0b0b0b 3px, #0b0b0b 4px)",
+                                              transform: isPlaying ? "translateX(24px) rotate(180deg)" : "translateX(0px)",
+                                            }}>
+                                            <div className="absolute inset-4 rounded-full border border-white/5 flex items-center justify-center bg-gradient-to-tr from-violet-600 to-pink-600">
+                                              <div className="h-2 w-2 rounded-full bg-zinc-950" />
+                                            </div>
+                                          </div>
+                                        </div>
+
+                                        <div className="min-w-0 flex-1 ml-5">
+                                          <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
+                                          <p className="text-[8px] font-mono text-zinc-600 uppercase mt-0.5">{track.album || "Single"}</p>
+                                        </div>
+                                      </div>
+
+                                      <button
+                                        onClick={() => handlePlayPreview(track.artist, track.title, track.previewUrl)}
+                                        className={`h-8 w-8 rounded-xl flex items-center justify-center transition-all ${
+                                          isPlaying ? "bg-pink-600 text-white" : "bg-zinc-800 text-zinc-300 hover:text-white"
+                                        }`}
+                                      >
+                                        {isLoading ? (
+                                          <span className="w-3.5 h-3.5 border-2 border-t-transparent border-white rounded-full animate-spin" />
+                                        ) : isPlaying ? (
+                                          <Pause className="h-3.5 w-3.5" />
+                                        ) : (
+                                          <Play className="h-3.5 w-3.5 ml-0.5" />
+                                        )}
+                                      </button>
+                                    </div>
+
+                                    {isPlaying && details && (
+                                      <div className="mt-3 p-3.5 rounded-xl border border-violet-500/20 bg-black/40 overflow-hidden">
+                                        <div 
+                                          ref={lyricsScrollRef}
+                                          className="overflow-y-auto px-1 max-h-[120px] space-y-1 select-none scrollbar-none"
+                                        >
+                                          {details.lrcLines && details.lrcLines.length > 0 ? (
+                                            <div className="py-6 space-y-0.5">
+                                              {details.lrcLines.map((line, idx) => (
+                                                <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                                  {line.text}
+                                                </p>
+                                              ))}
+                                            </div>
+                                          ) : details.lyrics ? (
+                                            <div className="py-6 space-y-0.5">
+                                              {details.lyrics.split("\n").filter(Boolean).map((line, idx) => (
+                                                <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                                  {line}
+                                                </p>
+                                              ))}
+                                            </div>
+                                          ) : (
+                                            <p className="text-[10px] text-zinc-600 italic text-center py-4">No lyrics loaded.</p>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+
+                  {/* ───────────────── ALL SONGS VIEW ───────────────── */}
+                  {libraryGroupBy === "all" && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      {libraryTracks.map((track) => {
+                        const trackKey = `${track.artist.toLowerCase()}||${track.title.toLowerCase()}`;
+                        const isPlaying = playingTrackId === trackKey;
+                        const details = trackDetails[trackKey];
+                        const isLoading = loadingTrack[trackKey] || false;
+
+                        return (
+                          <div
+                            key={track.id}
+                            className="track-card-sleeve rounded-2xl p-3 flex flex-col gap-3 border border-white/5"
+                            style={{
+                              background: isPlaying ? "linear-gradient(180deg, #101018 0%, #0a0a0f 100%)" : "linear-gradient(180deg, #15151e 0%, #0d0d14 100%)",
+                            }}
+                          >
+                            <div className="flex items-center justify-between gap-3 w-full">
+                              <div className="flex items-center gap-3 min-w-0 flex-1">
+                                <div className="relative h-14 w-14 rounded-xl shrink-0 overflow-visible">
+                                  <div className="absolute inset-0 rounded-xl overflow-hidden z-10 bg-zinc-950 border border-white/10">
+                                    {track.coverArtUrl ? (
+                                      <img src={track.coverArtUrl} alt={track.title} className="h-full w-full object-cover" />
+                                    ) : (
+                                      <div className="h-full w-full flex items-center justify-center bg-zinc-900">
+                                        <Music2 className="h-5 w-5 text-zinc-700" />
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="absolute top-0 right-0 h-14 w-14 rounded-full bg-zinc-950 z-0 transition-transform duration-700"
+                                    style={{
+                                      background: "repeating-radial-gradient(circle, #101010, #101010 2px, #0b0b0b 3px, #0b0b0b 4px)",
+                                      transform: isPlaying ? "translateX(24px) rotate(180deg)" : "translateX(0px)",
+                                    }}>
+                                    <div className="absolute inset-4 rounded-full border border-white/5 flex items-center justify-center bg-gradient-to-tr from-violet-600 to-pink-600">
+                                      <div className="h-2 w-2 rounded-full bg-zinc-950" />
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="min-w-0 flex-1 ml-5">
+                                  <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
+                                  <p className="text-[10px] text-zinc-400 font-medium truncate mt-0.5">{track.artist}</p>
+                                  <p className="text-[8px] font-mono text-zinc-600 uppercase mt-0.5">{track.album || "Single"}</p>
+                                </div>
+                              </div>
+
+                              <button
+                                onClick={() => handlePlayPreview(track.artist, track.title, track.previewUrl)}
+                                className={`h-8 w-8 rounded-xl flex items-center justify-center transition-all ${
+                                  isPlaying ? "bg-pink-600 text-white" : "bg-zinc-800 text-zinc-300 hover:text-white"
+                                }`}
+                              >
+                                {isLoading ? (
+                                  <span className="w-3.5 h-3.5 border-2 border-t-transparent border-white rounded-full animate-spin" />
+                                ) : isPlaying ? (
+                                  <Pause className="h-3.5 w-3.5" />
+                                ) : (
+                                  <Play className="h-3.5 w-3.5 ml-0.5" />
+                                )}
+                              </button>
+                            </div>
+
+                            {isPlaying && details && (
+                              <div className="mt-3 p-3.5 rounded-xl border border-violet-500/20 bg-black/40 overflow-hidden">
+                                <div 
+                                  ref={lyricsScrollRef}
+                                  className="overflow-y-auto px-1 max-h-[120px] space-y-1 select-none scrollbar-none"
+                                >
+                                  {details.lrcLines && details.lrcLines.length > 0 ? (
+                                    <div className="py-6 space-y-0.5">
+                                      {details.lrcLines.map((line, idx) => (
+                                        <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                          {line.text}
+                                        </p>
+                                      ))}
+</div>
+                                  ) : details.lyrics ? (
+                                    <div className="py-6 space-y-0.5">
+                                      {details.lyrics.split("\n").filter(Boolean).map((line, idx) => (
+                                        <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                          {line}
+                                        </p>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-[10px] text-zinc-600 italic text-center py-4">No lyrics loaded.</p>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                </div>
+              )}
+            </div>
+        ) : (
+          <>
+            {/* ─── Messages Viewport ─────────────────────────────────── */}
+            <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6 space-y-5">
           
           {/* ─── Welcome / Empty State ──────────────────────────── */}
           {messages.length === 0 && !streamingMessage && (
@@ -1574,6 +2335,8 @@ export default function ChatContainer({
             </div>
           </form>
         </div>
+          </>
+        )}
       </div>
 
 
@@ -1667,6 +2430,11 @@ export default function ChatContainer({
       )}
 
 
+
+      {/* Hidden YouTube Iframe Player container */}
+      <div style={{ display: "none" }}>
+        <div id="youtube-player" />
+      </div>
 
     </div>
   );

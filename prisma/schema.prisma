@@ -39,6 +39,7 @@ model Conversation {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   messages      Message[]
+  tracks        DiscoveredTrack[]
 
   session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 }
@@ -63,4 +64,21 @@ model TasteProfile {
   updatedAt     DateTime @updatedAt
 
   session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model DiscoveredTrack {
+  id             String   @id @default(uuid())
+  conversationId String
+  title          String
+  artist         String
+  album          String?
+  coverArtUrl    String?
+  previewUrl     String?   // iTunes 30s preview fallback
+  syncedLyrics   String?   // raw LRC format
+  lyrics         String?   // raw text
+  mood           String    @default("all")
+  createdAt      DateTime  @default(now())
+
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  @@unique([conversationId, title, artist])
 }

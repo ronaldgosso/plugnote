@@ -169,20 +169,63 @@ export async function sendMessage(conversationId: string, content: string, provi
       // Extract artist names from AI response and update the taste profile
       // Uses the same dual-pattern regex as the client-side extractTracks helper
       const extractedArtists: string[] = [];
-      const p1 = /"[^"]+"\s*(?:\*\*)?\s*by\s*(?:\*\*)?\s*([A-Za-z0-9\s,&'.\-\(\)\u00C0-\u017F\u0180-\u024F]+)/gi;
+      const discoveredTracks: { title: string; artist: string }[] = [];
+      const seenTracks = new Set<string>();
+
+      const p1 = /"([^"]+)"\s*(?:\*\*)?\s*by\s*(?:\*\*)?\s*([A-Za-z0-9\s,&'.\-\(\)\u00C0-\u017F\u0180-\u024F]+)/gi;
       let m: RegExpExecArray | null;
       while ((m = p1.exec(fullContent)) !== null) {
-        const a = m[1].trim();
-        if (a.length > 1) extractedArtists.push(a);
+        const title = m[1].trim();
+        const artist = m[2].trim();
+        if (artist.length > 1) extractedArtists.push(artist);
+        
+        const trackKey = `${title.toLowerCase()}||${artist.toLowerCase()}`;
+        if (!seenTracks.has(trackKey) && title.length > 1 && artist.length > 1) {
+          seenTracks.add(trackKey);
+          discoveredTracks.push({ title, artist });
+        }
       }
+
       const lines = fullContent.split("\n");
       const p2 = /^\s*[\-\*\d\.\s]*\s*(?:\*\*)?\s*([A-Za-z0-9\s,&'.\-\(\)\u00C0-\u017F\u0180-\u024F]+)\s*-\s*(?:\*\*)?\s*["']?([^"'\n*]+)["']?\s*(?:\*\*)?$/i;
       for (const line of lines) {
         const m2 = p2.exec(line);
         if (m2) {
-          const a = m2[1].trim();
-          if (a.length > 1) extractedArtists.push(a);
+          const artist = m2[1].trim();
+          const title = m2[2].trim();
+          if (artist.length > 1) extractedArtists.push(artist);
+
+          const trackKey = `${title.toLowerCase()}||${artist.toLowerCase()}`;
+          if (!seenTracks.has(trackKey) && title.length > 1 && artist.length > 1) {
+            seenTracks.add(trackKey);
+            discoveredTracks.push({ title, artist });
+          }
         }
+      }
+
+      // Resolve metadata and save each track to DB in background
+      if (discoveredTracks.length > 0) {
+        (async () => {
+          const { getTrackDetails } = await import("@/lib/music");
+          const { saveDiscoveredTrack } = await import("./library");
+          for (const t of discoveredTracks) {
+            try {
+              const details = await getTrackDetails(t.artist, t.title);
+              await saveDiscoveredTrack(conversationId, {
+                title: t.title,
+                artist: t.artist,
+                album: details?.album,
+                coverArtUrl: details?.coverArtUrl,
+                previewUrl: details?.previewUrl,
+                syncedLyrics: details?.syncedLyrics,
+                lyrics: details?.lyrics,
+                mood: activeMood, // tag the track with the active chat mood
+              });
+            } catch (saveErr) {
+              console.error(`[sendMessage] Failed to save track ${t.title}`, saveErr);
+            }
+          }
+        })().catch(() => {});
       }
       // Extract genre keywords from both user query and AI response
       const knownGenres = ["rock", "jazz", "electronic", "ambient", "pop", "metal", "hip-hop", "classical", "folk", "techno", "indie", "soul", "blues", "country", "funk", "reggae", "synthwave", "shoegaze", "house", "afrobeat", "lo-fi"];

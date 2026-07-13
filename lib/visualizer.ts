@@ -57,19 +57,33 @@ export function createVisualizer(audio: HTMLAudioElement): Visualizer | null {
  *                  caller can cancel the loop: cancelAnimationFrame(rafRef.current!)
  */
 export function drawVisualizer(
-  analyser: AnalyserNode,
+  analyser: AnalyserNode | null,
   canvas: HTMLCanvasElement,
   rafRef: React.MutableRefObject<number | null>
 ): void {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
-  const bufferLength = analyser.frequencyBinCount; // = fftSize / 2 = 32
+  const bufferLength = analyser ? analyser.frequencyBinCount : 32;
   const dataArray = new Uint8Array(bufferLength);
+  let frame = 0;
 
   const render = () => {
     rafRef.current = requestAnimationFrame(render);
-    analyser.getByteFrequencyData(dataArray);
+    frame++;
+
+    if (analyser) {
+      analyser.getByteFrequencyData(dataArray);
+    } else {
+      // Generate a highly realistic simulated FFT wave pattern for YouTube iframe streams
+      for (let i = 0; i < bufferLength; i++) {
+        const beat = Math.sin(frame * 0.16 + i * 0.35) * 0.5 + 0.5;
+        const subBeat = Math.cos(frame * 0.08 - i * 0.2) * 0.3 + 0.3;
+        const rand = Math.random() * 0.15;
+        const falloff = Math.max(0.15, 1 - (i / bufferLength) * 0.85);
+        dataArray[i] = Math.floor((beat * 0.65 + subBeat * 0.2 + rand * 0.15) * 255 * falloff);
+      }
+    }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
