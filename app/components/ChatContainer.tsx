@@ -981,13 +981,10 @@ export default function ChatContainer({
             {/* Library Toggle button */}
             <button
               onClick={() => {
-                setViewMode(viewMode === "chat" ? "library" : "chat");
                 if (viewMode === "chat") {
-                  if (conversations.length > 0) {
-                    handleSelectConversation(conversations[0].id);
-                  }
+                  setViewMode("library");
                 } else {
-                  setActiveId(undefined);
+                  setViewMode("chat");
                 }
               }}
               className="w-full text-left flex items-center justify-between rounded-xl px-3 py-2 cursor-pointer transition-all duration-300"
@@ -1014,110 +1011,192 @@ export default function ChatContainer({
             </button>
           </div>
 
-          {/* Recent Chats List — grouped by date */}
-          <div className="flex-1 overflow-y-auto py-2 px-2">
-            {conversations.length === 0 ? (
-              <div className="text-xs text-zinc-600 italic p-4 text-center">
-                No sessions yet. Start chatting!
+          {/* Sidebar Content — switches based on viewMode */}
+          {viewMode === "library" ? (
+            /* ── Library Sidebar: stats & quick filters ── */
+            <div className="flex-1 overflow-y-auto py-3 px-3 space-y-4">
+              {/* Track Count Summary */}
+              <div className="p-3 rounded-xl space-y-2"
+                style={{
+                  background: "linear-gradient(135deg, rgba(139,92,246,0.06) 0%, rgba(109,40,217,0.03) 100%)",
+                  border: "1px solid rgba(139,92,246,0.12)",
+                }}>
+                <div className="text-[9px] font-mono uppercase tracking-[0.2em] text-zinc-500">Library Overview</div>
+                <div className="text-2xl font-extrabold text-violet-400">{libraryTracks.length}</div>
+                <div className="text-[10px] text-zinc-500">songs discovered</div>
               </div>
-            ) : (
-              groupedConversations.map((group) => (
-                <div key={group.label}>
-                  <div className="sidebar-group-label">{group.label}</div>
-                  <div className="space-y-0.5">
-                    {group.items.map((conv) => {
-                      const isActive = activeId === conv.id;
-                      const isEditing = editingId === conv.id;
 
-                      return (
-                        <div
-                          key={conv.id}
-                          onClick={() => handleSelectConversation(conv.id)}
-                          className="group relative flex items-center justify-between rounded-xl px-3 py-2.5 cursor-pointer transition-all"
-                          style={isActive ? {
-                            background: "linear-gradient(135deg, rgba(139,92,246,0.12) 0%, rgba(109,40,217,0.06) 100%)",
-                            border: "1px solid rgba(139,92,246,0.18)",
-                            boxShadow: "0 0 12px rgba(139,92,246,0.08), inset 0 1px 0 rgba(139,92,246,0.1)",
-                          } : {
-                            border: "1px solid transparent",
-                          }}
-                          onMouseEnter={(e) => {
-                            if (!isActive) {
-                              (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.03)";
-                              (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(255,255,255,0.05)";
-                            }
-                          }}
-                          onMouseLeave={(e) => {
-                            if (!isActive) {
-                              (e.currentTarget as HTMLDivElement).style.background = "";
-                              (e.currentTarget as HTMLDivElement).style.borderColor = "transparent";
-                            }
-                          }}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0 pr-8">
-                            {/* Wax circle when active */}
-                            <div className={`h-6 w-6 rounded-lg flex items-center justify-center shrink-0 transition-all ${
-                              isActive
-                                ? "bg-violet-600/20"
-                                : "bg-zinc-800/60"
-                            }`}
-                              style={isActive ? {
-                                boxShadow: "0 0 8px rgba(139,92,246,0.3), inset 0 1px 0 rgba(139,92,246,0.2)",
-                              } : {}}
-                            >
-                              <MessageSquare className={`h-3 w-3 ${ isActive ? "text-violet-400" : "text-zinc-600"}`} />
-                            </div>
-                            
-                            {isEditing ? (
-                              <form 
-                                onSubmit={(e) => saveRename(conv.id, e)} 
-                                onClick={(e) => e.stopPropagation()}
-                                className="w-full"
+              {/* Artists Count */}
+              <div className="p-3 rounded-xl space-y-1.5"
+                style={{
+                  background: "rgba(255,255,255,0.02)",
+                  border: "1px solid rgba(255,255,255,0.04)",
+                }}>
+                <div className="text-[9px] font-mono uppercase tracking-[0.2em] text-zinc-500">Artists</div>
+                <div className="text-lg font-bold text-zinc-200">
+                  {new Set(libraryTracks.map(t => t.artist)).size}
+                </div>
+              </div>
+
+              {/* Mood Breakdown */}
+              <div className="space-y-2">
+                <div className="text-[9px] font-mono uppercase tracking-[0.2em] text-zinc-500 px-1">Moods</div>
+                {["chill", "energetic", "focused", "melancholic", "mystical"].map((mood) => {
+                  const count = libraryTracks.filter(t => t.mood === mood).length;
+                  if (count === 0) return null;
+                  return (
+                    <button
+                      key={mood}
+                      onClick={() => {
+                        setLibraryGroupBy("mood");
+                        setLibraryFilterMood(mood);
+                      }}
+                      className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-all hover:bg-white/[0.03]"
+                      style={{ border: "1px solid transparent" }}
+                    >
+                      <span className="capitalize text-zinc-300 font-medium">{mood}</span>
+                      <span className="text-[10px] font-mono text-zinc-600 tabular-nums">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Quick Actions */}
+              <div className="space-y-1 pt-2">
+                <div className="text-[9px] font-mono uppercase tracking-[0.2em] text-zinc-500 px-1">Quick View</div>
+                {[
+                  { id: "recent" as const, label: "Recently Discovered" },
+                  { id: "artist" as const, label: "By Artist" },
+                  { id: "all" as const, label: "All Tracks" },
+                ].map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      setLibraryGroupBy(item.id);
+                      setLibraryFilterMood("all");
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs transition-all"
+                    style={libraryGroupBy === item.id ? {
+                      background: "rgba(139,92,246,0.1)",
+                      border: "1px solid rgba(139,92,246,0.2)",
+                      color: "#a78bfa",
+                    } : {
+                      border: "1px solid transparent",
+                      color: "#71717a",
+                    }}
+                  >
+                    <Library className="h-3 w-3" />
+                    <span className="font-medium">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            /* ── Chat Sidebar: conversation history ── */
+            <div className="flex-1 overflow-y-auto py-2 px-2">
+              {conversations.length === 0 ? (
+                <div className="text-xs text-zinc-600 italic p-4 text-center">
+                  No sessions yet. Start chatting!
+                </div>
+              ) : (
+                groupedConversations.map((group) => (
+                  <div key={group.label}>
+                    <div className="sidebar-group-label">{group.label}</div>
+                    <div className="space-y-0.5">
+                      {group.items.map((conv) => {
+                        const isActive = activeId === conv.id;
+                        const isEditing = editingId === conv.id;
+
+                        return (
+                          <div
+                            key={conv.id}
+                            onClick={() => handleSelectConversation(conv.id)}
+                            className="group relative flex items-center justify-between rounded-xl px-3 py-2.5 cursor-pointer transition-all"
+                            style={isActive ? {
+                              background: "linear-gradient(135deg, rgba(139,92,246,0.12) 0%, rgba(109,40,217,0.06) 100%)",
+                              border: "1px solid rgba(139,92,246,0.18)",
+                              boxShadow: "0 0 12px rgba(139,92,246,0.08), inset 0 1px 0 rgba(139,92,246,0.1)",
+                            } : {
+                              border: "1px solid transparent",
+                            }}
+                            onMouseEnter={(e) => {
+                              if (!isActive) {
+                                (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.03)";
+                                (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(255,255,255,0.05)";
+                              }
+                            }}
+                            onMouseLeave={(e) => {
+                              if (!isActive) {
+                                (e.currentTarget as HTMLDivElement).style.background = "";
+                                (e.currentTarget as HTMLDivElement).style.borderColor = "transparent";
+                              }
+                            }}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0 pr-8">
+                              {/* Wax circle when active */}
+                              <div className={`h-6 w-6 rounded-lg flex items-center justify-center shrink-0 transition-all ${
+                                isActive
+                                  ? "bg-violet-600/20"
+                                  : "bg-zinc-800/60"
+                              }`}
+                                style={isActive ? {
+                                  boxShadow: "0 0 8px rgba(139,92,246,0.3), inset 0 1px 0 rgba(139,92,246,0.2)",
+                                } : {}}
                               >
-                                <input
-                                  autoFocus
-                                  type="text"
-                                  value={editTitle}
-                                  onChange={(e) => setEditTitle(e.target.value)}
-                                  onBlur={(e) => saveRename(conv.id, e as any)}
-                                  onKeyDown={(e) => handleRenameKeyDown(e, conv.id)}
-                                  className="bg-zinc-950 border border-violet-500/40 rounded-lg px-2 py-0.5 text-xs text-zinc-100 focus:outline-none w-full"
-                                  style={{ boxShadow: "0 0 8px rgba(139,92,246,0.2)" }}
-                                />
-                              </form>
-                            ) : (
-                              <span className={`text-xs font-medium truncate ${ isActive ? "text-zinc-100" : "text-zinc-400"}`}>
-                                {conv.title}
-                              </span>
+                                <MessageSquare className={`h-3 w-3 ${ isActive ? "text-violet-400" : "text-zinc-600"}`} />
+                              </div>
+                              
+                              {isEditing ? (
+                                <form 
+                                  onSubmit={(e) => saveRename(conv.id, e)} 
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="w-full"
+                                >
+                                  <input
+                                    autoFocus
+                                    type="text"
+                                    value={editTitle}
+                                    onChange={(e) => setEditTitle(e.target.value)}
+                                    onBlur={(e) => saveRename(conv.id, e as any)}
+                                    onKeyDown={(e) => handleRenameKeyDown(e, conv.id)}
+                                    className="bg-zinc-950 border border-violet-500/40 rounded-lg px-2 py-0.5 text-xs text-zinc-100 focus:outline-none w-full"
+                                    style={{ boxShadow: "0 0 8px rgba(139,92,246,0.2)" }}
+                                  />
+                                </form>
+                              ) : (
+                                <span className={`text-xs font-medium truncate ${ isActive ? "text-zinc-100" : "text-zinc-400"}`}>
+                                  {conv.title}
+                                </span>
+                              )}
+                            </div>
+
+                            {!isEditing && (
+                              <div className="absolute right-2 opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
+                                <button
+                                  onClick={(e) => startRename(conv.id, conv.title, e)}
+                                  className="p-1 hover:text-zinc-200 text-zinc-600 transition-colors rounded"
+                                  title="Rename"
+                                >
+                                  <Edit2 className="h-3 w-3" />
+                                </button>
+                                <button
+                                  onClick={(e) => handleDeleteChat(conv.id, e)}
+                                  className="p-1 hover:text-red-400 text-zinc-600 transition-colors rounded"
+                                  title="Delete"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              </div>
                             )}
                           </div>
-
-                          {!isEditing && (
-                            <div className="absolute right-2 opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
-                              <button
-                                onClick={(e) => startRename(conv.id, conv.title, e)}
-                                className="p-1 hover:text-zinc-200 text-zinc-600 transition-colors rounded"
-                                title="Rename"
-                              >
-                                <Edit2 className="h-3 w-3" />
-                              </button>
-                              <button
-                                onClick={(e) => handleDeleteChat(conv.id, e)}
-                                className="p-1 hover:text-red-400 text-zinc-600 transition-colors rounded"
-                                title="Delete"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-              ))
-            )}
-          </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
 
         {/* Sidebar Footer — Trial Usage */}
