@@ -4,7 +4,29 @@ export interface SongDetails {
   album: string;
   coverArtUrl: string;
   previewUrl: string | null;
+  /** Plain-text lyrics (fallback display when syncedLyrics is unavailable) */
   lyrics: string | null;
+  /** Raw LRC-format synced lyrics with [mm:ss.xx] timestamps for karaoke sync */
+  syncedLyrics: string | null;
+  lrcLines: { time: number; text: string }[] | null;
+}
+
+interface LrcLine {
+  time: number;
+  text: string;
+}
+
+function parseLrc(raw: string): LrcLine[] {
+  const lines: LrcLine[] = [];
+  const re = /\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const ms = (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) * 1000
+             + parseInt(m[3].padEnd(3, "0"), 10);
+    const text = m[4].trim();
+    if (text) lines.push({ time: ms, text });
+  }
+  return lines.sort((a, b) => a.time - b.time);
 }
 
 export async function getTrackDetails(artist: string, track: string): Promise<SongDetails | null> {
@@ -38,13 +60,15 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
 
     // Fetch lyrics from LRCLib API
     let lyrics: string | null = null;
+    let syncedLyrics: string | null = null;
     try {
       const lrcUrl = `https://lrclib.net/api/get?artist=${encodeURIComponent(verifiedArtist)}&title=${encodeURIComponent(verifiedTrack)}`;
       const lrcRes = await fetch(lrcUrl, { next: { revalidate: 86400 } });
       
       if (lrcRes.ok) {
         const lrcData = await lrcRes.json();
-        lyrics = lrcData.plainLyrics || lrcData.syncedLyrics || null;
+        lyrics = lrcData.plainLyrics || null;
+        syncedLyrics = lrcData.syncedLyrics || null;
       } else {
         // Fallback to query search
         const searchUrl = `https://lrclib.net/api/search?q=${encodeURIComponent(verifiedArtist + " " + verifiedTrack)}`;
@@ -52,7 +76,8 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
         if (searchRes.ok) {
           const searchData = await searchRes.json();
           if (searchData && searchData.length > 0) {
-            lyrics = searchData[0].plainLyrics || searchData[0].syncedLyrics || null;
+            lyrics = searchData[0].plainLyrics || null;
+            syncedLyrics = searchData[0].syncedLyrics || null;
           }
         }
       }
@@ -60,13 +85,17 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
       console.error("Error fetching lyrics from LRCLib:", err);
     }
 
+    const lrcLines = syncedLyrics ? parseLrc(syncedLyrics) : null;
+
     return {
       title: verifiedTrack,
       artist: verifiedArtist,
       album: verifiedAlbum,
       coverArtUrl,
       previewUrl,
-      lyrics
+      lyrics,
+      syncedLyrics,
+      lrcLines,
     };
   } catch (error) {
     console.error("Error in getTrackDetails:", error);

@@ -14,6 +14,7 @@ model Session {
   updatedAt        DateTime       @updatedAt
   conversations    Conversation[]
   apiKeys          UserApiKey[]
+  tasteProfile     TasteProfile?
 }
 
 model UserApiKey {
@@ -47,7 +48,19 @@ model Message {
   conversationId String
   role           String   // 'user' | 'assistant'
   content        String
+  reaction       String?  // 'like' | 'fire' | 'insight' | 'love' — user emoji reaction
   createdAt      DateTime @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model TasteProfile {
+  id            String   @id @default(uuid())
+  sessionId     String   @unique
+  likedGenres   String   @default("[]") // JSON array of genre strings
+  exploredArtists String @default("[]") // JSON array of artist name strings
+  moodHistory   String   @default("[]") // JSON array of mood id strings
+  updatedAt     DateTime @updatedAt
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 }

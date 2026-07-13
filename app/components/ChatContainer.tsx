@@ -1,20 +1,22 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { 
-  Plus, MessageSquare, Trash2, Edit2, Send, Sparkles, Settings, Play, Pause, 
+import {
+  Plus, MessageSquare, Trash2, Edit2, Send, Sparkles, Settings, Play, Pause,
   FileText, Music2, AlertTriangle, Menu, X, ArrowUpRight,
-  HelpCircle, Star, PanelLeftOpen, PanelLeftClose
+  HelpCircle, Star, PanelLeftOpen, PanelLeftClose, ExternalLink
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { readStreamableValue } from "ai/rsc";
 import { useRouter } from "next/navigation";
-import { 
-  sendMessage, getMessages, createConversation, deleteConversation, 
-  renameConversation, getConversations, getFreeTrialStatus 
+import {
+  sendMessage, getMessages, createConversation, deleteConversation,
+  renameConversation, getConversations, getFreeTrialStatus
 } from "@/app/actions/chat";
 import { fetchTrackDetailsAction } from "@/app/actions/music";
+import { reactToMessage } from "@/app/actions/reactions";
 import { PROVIDERS_INFO, ProviderId } from "@/lib/ai";
+import { createVisualizer, drawVisualizer, type Visualizer } from "@/lib/visualizer";
 
 interface Conversation {
   id: string;
@@ -29,6 +31,7 @@ interface Message {
   role: string;
   content: string;
   createdAt: Date;
+  reaction?: string | null;
 }
 
 interface ChatContainerProps {
@@ -44,13 +47,72 @@ interface ParsedTrack {
   artist: string;
 }
 
+// Parsed LRC timestamp line for karaoke sync
+interface LrcLine {
+  time: number; // milliseconds from track start
+  text: string;
+}
+
 // Track details cache to avoid redundant API queries
 interface TrackCacheItem {
   coverArtUrl: string;
   previewUrl: string | null;
   lyrics: string | null;
+  syncedLyrics: string | null;
   album: string;
+  lrcLines?: LrcLine[] | null;
 }
+
+// Emoji reaction definitions
+const REACTIONS = [
+  { emoji: "👍", id: "like",    label: "Like" },
+  { emoji: "🔥", id: "fire",    label: "Fire" },
+  { emoji: "💡", id: "insight", label: "Insightful" },
+  { emoji: "❤️", id: "love",   label: "Love" },
+] as const;
+
+// Mood-reactive theme palette
+const MOOD_THEMES: Record<string, { primary: string; secondary: string; ring: string; accent: string; bg: string }> = {
+  all:    { primary: "#8b5cf6", secondary: "#ec4899", ring: "#d8b4fe", accent: "#06b6d4", bg: "#08080a" },
+  chill:  { primary: "#f59e0b", secondary: "#fb923c", ring: "#fde68a", accent: "#fbbf24", bg: "#0f0a00" },
+  focus:  { primary: "#06b6d4", secondary: "#0ea5e9", ring: "#67e8f9", accent: "#38bdf8", bg: "#00050f" },
+  energy: { primary: "#84cc16", secondary: "#facc15", ring: "#bef264", accent: "#a3e635", bg: "#020800" },
+  sad:    { primary: "#6366f1", secondary: "#818cf8", ring: "#a5b4fc", accent: "#6366f1", bg: "#050508" },
+  dreamy: { primary: "#ec4899", secondary: "#f472b6", ring: "#fbcfe8", accent: "#e879f9", bg: "#080410" },
+};
+
+/** Applies a mood theme by mutating CSS custom properties on :root */
+function applyMoodTheme(moodId: string) {
+  const theme = MOOD_THEMES[moodId] ?? MOOD_THEMES.all;
+  const root = document.documentElement;
+  root.style.setProperty("--primary",   theme.primary);
+  root.style.setProperty("--secondary", theme.secondary);
+  root.style.setProperty("--ring",      theme.ring);
+  root.style.setProperty("--accent",    theme.accent);
+  root.style.setProperty("--background", theme.bg);
+}
+
+/** Parses raw LRC-format synced lyrics into timed lines (milliseconds) */
+function parseLrc(raw: string): LrcLine[] {
+  const lines: LrcLine[] = [];
+  const re = /\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const ms = (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) * 1000
+             + parseInt(m[3].padEnd(3, "0"), 10);
+    const text = m[4].trim();
+    if (text) lines.push({ time: ms, text });
+  }
+  return lines.sort((a, b) => a.time - b.time);
+}
+
+/** Generates a Spotify search deep-link URL */
+const getSpotifyUrl = (artist: string, title: string) =>
+  `https://open.spotify.com/search/${encodeURIComponent(`${title} ${artist}`)}`;
+
+/** Generates a YouTube Music search URL */
+const getYouTubeUrl = (artist: string, title: string) =>
+  `https://music.youtube.com/search?q=${encodeURIComponent(`${title} ${artist}`)}`;
 
 const MOOD_PROMPTS: Record<string, string[]> = {
   all: [
@@ -163,26 +225,51 @@ export default function ChatContainer({
   const [trackDetails, setTrackDetails] = useState<Record<string, TrackCacheItem>>({});
   const [loadingTrack, setLoadingTrack] = useState<Record<string, boolean>>({});
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null); // "artist||title"
-  const [lyricsTrack, setLyricsTrack] = useState<{ artist: string; title: string; lyrics: string | null } | null>(null);
+  const [lyricsTrack, setLyricsTrack] = useState<{
+    artist: string;
+    title: string;
+    lyrics: string | null;
+    lrcLines: LrcLine[] | null;
+  } | null>(null);
   const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>([]);
   const [activeMood, setActiveMood] = useState<string>("all");
-  
-  // Active lyrics line index (for line-by-line highlight)
-  const [activeLyricLine, setActiveLyricLine] = useState<number>(0);
-  // Waveform mini bar heights for audio player animation
-  const [waveformHeights, setWaveformHeights] = useState<number[]>([6, 10, 5, 8, 4, 11, 7, 3, 9, 6]);
+  // Emoji reactions: messageId → reactionId
+  const [messageReactions, setMessageReactions] = useState<Record<string, string | null>>(() =>
+    initialMessages.reduce((acc, m) => {
+      if (m.reaction) acc[m.id] = m.reaction;
+      return acc;
+    }, {} as Record<string, string | null>)
+  );
 
-  // Audio Controller
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Active lyrics line index (for karaoke highlight)
+  const [activeLyricLine, setActiveLyricLine] = useState<number>(0);
+
+  // Refs — audio, scroll anchor, fetch dedup, interval/raf handles
+  const audioRef       = useRef<HTMLAudioElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  // Pending fetches dedup map — prevents concurrent duplicate track API requests
+  const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingFetches = useRef<Map<string, Promise<void>>>(new Map());
-  // Typewriter interval ref — prevents stale closure leaks on rapid re-renders
   const typewriterIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Lyrics line advance interval ref
-  const lyricsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Waveform animation interval ref
-  const waveformIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lyricsIntervalRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Web Audio visualizer
+  const visualizerRef  = useRef<Visualizer | null>(null);
+  const canvasRef      = useRef<HTMLCanvasElement | null>(null);
+  const rafRef         = useRef<number | null>(null);
+
+  const canvasCallbackRef = useCallback((canvas: HTMLCanvasElement | null) => {
+    canvasRef.current = canvas;
+    if (canvas && visualizerRef.current) {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      drawVisualizer(visualizerRef.current.analyser, canvas, rafRef);
+    }
+  }, []);
+  // LRC timeupdate handler ref (stable reference for removeEventListener)
+  const timeUpdateHandlerRef = useRef<(() => void) | null>(null);
+  // LRC lines ref (avoids stale closure in the timeupdate handler)
+  const lrcLinesRef = useRef<LrcLine[] | null>(null);
 
   // Auto-scroll to bottom of chat — via RAF to avoid layout thrash
   useEffect(() => {
@@ -192,15 +279,39 @@ export default function ChatContainer({
     return () => cancelAnimationFrame(raf);
   }, [messages, streamingMessage]);
 
-  // Cleanup audio + intervals on unmount
+  // Cleanup audio + visualizer + intervals on unmount
   useEffect(() => {
     return () => {
       if (audioRef.current) audioRef.current.pause();
       if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
       if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
-      if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (visualizerRef.current) visualizerRef.current.cleanup();
+      if (audioRef.current && timeUpdateHandlerRef.current) {
+        audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
+      }
     };
   }, []);
+
+  // Auto-scroll the active lyric line into view inside the lyrics modal
+  useEffect(() => {
+    if (!lyricsScrollRef.current) return;
+    const activeEl = lyricsScrollRef.current.querySelector(".lyrics-line-active");
+    if (activeEl) {
+      activeEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [activeLyricLine]);
+
+  // Sync message reactions when messages change (e.g. conversation switches)
+  useEffect(() => {
+    const nextReactions: Record<string, string | null> = {};
+    messages.forEach((m) => {
+      if (m.reaction) {
+        nextReactions[m.id] = m.reaction;
+      }
+    });
+    setMessageReactions(nextReactions);
+  }, [messages]);
 
   // Shuffle suggestion prompts on mount, when messages reset (new chat), or when activeMood changes
   useEffect(() => {
@@ -209,6 +320,8 @@ export default function ChatContainer({
       const shuffled = [...promptsForMood].sort(() => 0.5 - Math.random());
       setSuggestedPrompts(shuffled.slice(0, 4));
     }
+    // Apply the mood theme when activeMood changes (client-only)
+    if (typeof window !== "undefined") applyMoodTheme(activeMood);
   }, [messages, activeMood]);
 
   // Poll free trial status in background to keep tabs synced in real-time
@@ -259,8 +372,8 @@ export default function ChatContainer({
     const results: ParsedTrack[] = [];
     const seen = new Set<string>();
 
-    // Pattern 1: "Song" by Artist
-    const pattern1 = /"([^"]+)"\s+by\s+([A-Za-z0-9\s,&'.\-]+)/gi;
+    // Pattern 1: "Song" by Artist (supporting markdown stars and accented characters)
+    const pattern1 = /"([^"]+)"\s*(?:\*\*)?\s*by\s*(?:\*\*)?\s*([A-Za-z0-9\s,&'.\-\(\)\u00C0-\u017F\u0180-\u024F]+)/gi;
     let match;
     while ((match = pattern1.exec(text)) !== null) {
       const title = match[1].trim();
@@ -272,9 +385,9 @@ export default function ChatContainer({
       }
     }
 
-    // Pattern 2: Artist - Song (on list lines starting with -, *, or digits)
+    // Pattern 2: Artist - Song (on list lines starting with -, *, or digits, supporting markdown stars and accented characters)
     const lines = text.split("\n");
-    const pattern2 = /^\s*[\-\*\d\.\s]*\s*([A-Za-z0-9\s,&'.\-]+)\s+-\s+["']?([^"'\n]+)["']?$/i;
+    const pattern2 = /^\s*[\-\*\d\.\s]*\s*(?:\*\*)?\s*([A-Za-z0-9\s,&'.\-\(\)\u00C0-\u017F\u0180-\u024F]+)\s*-\s*(?:\*\*)?\s*["']?([^"'\n*]+)["']?\s*(?:\*\*)?$/i;
     for (const line of lines) {
       const match2 = pattern2.exec(line);
       if (match2) {
@@ -304,10 +417,12 @@ export default function ChatContainer({
           setTrackDetails((prev) => ({
             ...prev,
             [key]: {
-              coverArtUrl: data.coverArtUrl || "",
-              previewUrl: data.previewUrl,
-              lyrics: data.lyrics,
-              album: data.album
+              coverArtUrl:   data.coverArtUrl || "",
+              previewUrl:    data.previewUrl,
+              lyrics:        data.lyrics,
+              syncedLyrics:  data.syncedLyrics,
+              album:         data.album,
+              lrcLines:      data.lrcLines || null,
             }
           }));
         }
@@ -336,79 +451,120 @@ export default function ChatContainer({
     });
   }, [messages, extractTracks, loadTrackData]);
 
-  // Play audio snippet — also starts waveform animation
+  // ── Stop helper — tears down audio + visualizer cleanly
+  const stopAudio = useCallback(() => {
+    if (audioRef.current) audioRef.current.pause();
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    if (visualizerRef.current) { visualizerRef.current.cleanup(); visualizerRef.current = null; }
+    setPlayingTrackId(null);
+  }, []);
+
+  // Play audio snippet — starts Web Audio visualizer
   const handlePlayPreview = async (artist: string, title: string, previewUrl: string | null) => {
     const trackId = `${artist.toLowerCase()}||${title.toLowerCase()}`;
-    
+
+    // Toggle off if already playing this track
     if (playingTrackId === trackId) {
-      if (audioRef.current) audioRef.current.pause();
-      setPlayingTrackId(null);
-      if (waveformIntervalRef.current) {
-        clearInterval(waveformIntervalRef.current);
-        waveformIntervalRef.current = null;
-      }
+      stopAudio();
       return;
     }
 
     if (!previewUrl) return;
 
-    if (audioRef.current) audioRef.current.pause();
+    // Tear down previous audio + visualizer
+    stopAudio();
 
-    const audio = new Audio(previewUrl);
+    const proxiedUrl = `/api/audio-proxy?url=${encodeURIComponent(previewUrl)}`;
+    const audio = new Audio(proxiedUrl);
+    audio.crossOrigin = "anonymous"; // required for AudioContext CORS
     audioRef.current = audio;
     setPlayingTrackId(trackId);
 
-    // Animate waveform bars while playing
-    if (waveformIntervalRef.current) clearInterval(waveformIntervalRef.current);
-    waveformIntervalRef.current = setInterval(() => {
-      setWaveformHeights(
-        Array.from({ length: 10 }, () => Math.floor(Math.random() * 14) + 3)
-      );
-    }, 120);
+    // Start Web Audio visualizer after user gesture (play button click)
+    const viz = createVisualizer(audio);
+    visualizerRef.current = viz;
+    if (viz && canvasRef.current) {
+      drawVisualizer(viz.analyser, canvasRef.current, rafRef);
+    }
 
     audio.play().catch((err) => {
-      // Ignore AbortError caused by rapid play/pause toggle actions
       if (err.name !== "AbortError") {
         console.error("Audio playback error:", err);
-        setPlayingTrackId(null);
+        stopAudio();
       }
     });
 
-    audio.onended = () => {
-      setPlayingTrackId(null);
-      if (waveformIntervalRef.current) {
-        clearInterval(waveformIntervalRef.current);
-        waveformIntervalRef.current = null;
-      }
-    };
+    audio.onended = () => stopAudio();
   };
 
-  // Show lyrics modal — start line-advance timer and waveform animation
-  const handleShowLyrics = (artist: string, title: string, lyrics: string | null) => {
-    setLyricsTrack({ artist, title, lyrics });
+  // Show lyrics modal — real LRC sync when syncedLyrics available, 2.5s timer as fallback
+  const handleShowLyrics = (
+    artist: string,
+    title: string,
+    lyrics: string | null,
+    syncedLyrics: string | null,
+    cachedLrcLines?: LrcLine[] | null
+  ) => {
+    // Clear any previous listeners / intervals
+    if (lyricsIntervalRef.current) { clearInterval(lyricsIntervalRef.current); lyricsIntervalRef.current = null; }
+    if (audioRef.current && timeUpdateHandlerRef.current) {
+      audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
+      timeUpdateHandlerRef.current = null;
+    }
+
+    const lrcLines = cachedLrcLines || (syncedLyrics ? parseLrc(syncedLyrics) : null);
+    lrcLinesRef.current = lrcLines;
+    setLyricsTrack({ artist, title, lyrics, lrcLines });
     setActiveLyricLine(0);
-    // Advance the active lyric line every ~2.5 seconds (simulated)
-    if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
-    if (lyrics) {
+
+    if (lrcLines && lrcLines.length > 0 && audioRef.current) {
+      // ── Real-time LRC sync via ontimeupdate
+      const handler = () => {
+        if (!audioRef.current || !lrcLinesRef.current) return;
+        const nowMs = audioRef.current.currentTime * 1000;
+        let idx = 0;
+        for (let i = 0; i < lrcLinesRef.current.length; i++) {
+          if (lrcLinesRef.current[i].time <= nowMs) idx = i;
+          else break;
+        }
+        setActiveLyricLine(idx);
+      };
+      timeUpdateHandlerRef.current = handler;
+      audioRef.current.addEventListener("timeupdate", handler);
+    } else if (lyrics) {
+      // ── Fallback: advance a line every 2.5s
       const lineCount = lyrics.split("\n").filter(Boolean).length;
       lyricsIntervalRef.current = setInterval(() => {
         setActiveLyricLine((prev) => {
-          if (prev >= lineCount - 1) {
-            if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
-            return prev;
-          }
+          if (prev >= lineCount - 1) { clearInterval(lyricsIntervalRef.current!); return prev; }
           return prev + 1;
         });
       }, 2500);
     }
   };
 
-  // Close lyrics modal — clear timer
+  // Close lyrics modal — clear all sync mechanisms
   const handleCloseLyrics = () => {
     setLyricsTrack(null);
-    if (lyricsIntervalRef.current) {
-      clearInterval(lyricsIntervalRef.current);
-      lyricsIntervalRef.current = null;
+    lrcLinesRef.current = null;
+    if (lyricsIntervalRef.current) { clearInterval(lyricsIntervalRef.current); lyricsIntervalRef.current = null; }
+    if (audioRef.current && timeUpdateHandlerRef.current) {
+      audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
+      timeUpdateHandlerRef.current = null;
+    }
+  };
+
+  // Emoji reaction handler — optimistic update + server persist
+  const handleReaction = async (messageId: string, reactionId: string) => {
+    const current = messageReactions[messageId];
+    const next = current === reactionId ? null : reactionId; // toggle off if same
+    setMessageReactions((prev) => ({ ...prev, [messageId]: next }));
+    try {
+      await reactToMessage(messageId, next);
+    } catch (e) {
+      console.error("Failed to save reaction:", e);
+      // Rollback optimistic update
+      setMessageReactions((prev) => ({ ...prev, [messageId]: current ?? null }));
     }
   };
 
@@ -500,7 +656,7 @@ export default function ChatContainer({
         setCurrentTrialStatus((prev) => ({ ...prev, used: Math.min(prev.limit, prev.used + 1) }));
       }
 
-      const responseStream = await sendMessage(targetConvId, userMessageContent, selectedProvider);
+      const responseStream = await sendMessage(targetConvId, userMessageContent, selectedProvider, activeMood);
       
       let targetText = "";
       let displayedText = "";
@@ -617,7 +773,7 @@ export default function ChatContainer({
   const isTrialExceeded = selectedProvider === "trial_mistral" && currentTrialStatus.used >= currentTrialStatus.limit;
 
   return (
-    <div className="flex h-[calc(100vh-64px)] w-full overflow-hidden relative" style={{ background: "#08080a" }}>
+    <div className="flex h-[calc(100vh-64px)] w-full overflow-hidden relative" style={{ background: "var(--background)" }}>
       
       {/* ─── Sidebar ───────────────────────────────────────────────── */}
       <div 
@@ -803,7 +959,7 @@ export default function ChatContainer({
       </div>
 
       {/* ─── Main Chat Workspace ──────────────────────────────────── */}
-      <div className="flex-1 flex flex-col justify-between h-full overflow-hidden" style={{ background: "#09090c" }}>
+      <div className="flex-1 flex flex-col justify-between h-full overflow-hidden" style={{ background: "var(--background)" }}>
         
         {/* Mobile Header */}
         <div className="flex md:hidden items-center justify-between px-4 py-3 z-20"
@@ -1074,6 +1230,26 @@ export default function ChatContainer({
                     )}
                   </div>
 
+                {/* ── Emoji Reaction Bar (assistant messages only) */}
+                {!isUser && msg.id && (
+                  <div className="flex items-center gap-0.5 px-1">
+                    {REACTIONS.map(({ emoji, id, label }) => {
+                      const isSelected = messageReactions[msg.id] === id;
+                      return (
+                        <button
+                          key={id}
+                          onClick={() => handleReaction(msg.id, id)}
+                          className={`reaction-btn ${isSelected ? "reaction-btn-active" : ""}`}
+                          title={label}
+                          aria-label={`React with ${label}`}
+                        >
+                          {emoji}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                   {/* Track Cards */}
                   {suggestedTracks.length > 0 && (
                     <div className="space-y-2">
@@ -1113,13 +1289,8 @@ export default function ChatContainer({
                                         className="object-cover h-full w-full"
                                       />
                                     ) : (
-                                      <div className="h-full w-full flex items-center justify-center">
-                                        <Music2 className="h-5 w-5 text-zinc-700" />
-                                      </div>
-                                    )}
-                                    {isLoading && (
-                                      <div className="absolute inset-0 bg-black/70 flex items-center justify-center">
-                                        <div className="w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                                      <div className={`h-full w-full flex items-center justify-center ${isLoading ? "shimmer-bg" : ""}`}>
+                                        <Music2 className={`h-5 w-5 text-zinc-700 ${isLoading ? "animate-pulse" : ""}`} />
                                       </div>
                                     )}
                                   </div>
@@ -1136,49 +1307,103 @@ export default function ChatContainer({
                                 </div>
                               </div>
 
+                              {/* Action buttons: Play, Lyrics, Spotify, YouTube, or loading state */}
                               <div className="flex items-center gap-1.5 shrink-0">
-                                {details?.previewUrl && (
-                                  <button
-                                    onClick={() => handlePlayPreview(track.artist, track.title, details.previewUrl)}
-                                    className="p-2 rounded-xl transition-all"
-                                    style={isPlaying ? {
-                                      background: "linear-gradient(135deg, #7c3aed, #8b5cf6)",
-                                      border: "1px solid rgba(139,92,246,0.5)",
-                                      color: "white",
-                                      boxShadow: "0 0 14px rgba(139,92,246,0.5), inset 0 1px 0 rgba(255,255,255,0.2)",
-                                    } : {
-                                      background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
-                                      border: "1px solid rgba(255,255,255,0.08)",
-                                      color: "#71717a",
-                                      boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
-                                    }}
-                                    title={isPlaying ? "Pause" : "Play 30s preview"}
-                                  >
-                                    {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-                                  </button>
-                                )}
-                                {details && (
-                                  <button
-                                    onClick={() => handleShowLyrics(track.artist, track.title, details.lyrics)}
-                                    className="p-2 rounded-xl transition-all"
+                                {isLoading ? (
+                                  <div 
+                                    className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-violet-500/20 shimmer-bg select-none"
                                     style={{
-                                      background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
-                                      border: "1px solid rgba(255,255,255,0.08)",
-                                      color: "#71717a",
-                                      boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                      boxShadow: "0 0 12px rgba(139,92,246,0.1), inset 0 1px 0 rgba(255,255,255,0.02)",
                                     }}
-                                    onMouseEnter={(e) => {
-                                      (e.currentTarget as HTMLButtonElement).style.color = "#d4d4d8";
-                                      (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(139,92,246,0.2)";
-                                    }}
-                                    onMouseLeave={(e) => {
-                                      (e.currentTarget as HTMLButtonElement).style.color = "#71717a";
-                                      (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.08)";
-                                    }}
-                                    title="View lyrics"
                                   >
-                                    <FileText className="h-3.5 w-3.5" />
-                                  </button>
+                                    {/* Spinner & Pulsing message */}
+                                    <div className="w-3 h-3 border border-violet-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                                    <span className="text-[9px] font-mono text-violet-400 font-bold uppercase tracking-wider">Syncing Preview...</span>
+                                  </div>
+                                ) : (
+                                  <>
+                                    {details?.previewUrl && (
+                                      <button
+                                        onClick={() => handlePlayPreview(track.artist, track.title, details.previewUrl)}
+                                        className="p-2 rounded-xl transition-all"
+                                        style={isPlaying ? {
+                                          background: "linear-gradient(135deg, #7c3aed, #8b5cf6)",
+                                          border: "1px solid rgba(139,92,246,0.5)",
+                                          color: "white",
+                                          boxShadow: "0 0 14px rgba(139,92,246,0.5), inset 0 1px 0 rgba(255,255,255,0.2)",
+                                        } : {
+                                          background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
+                                          border: "1px solid rgba(255,255,255,0.08)",
+                                          color: "#71717a",
+                                          boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                        }}
+                                        title={isPlaying ? "Pause" : "Play 30s preview"}
+                                      >
+                                        {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                                      </button>
+                                    )}
+                                    {details && (
+                                      <button
+                                        onClick={() => handleShowLyrics(track.artist, track.title, details.lyrics, details.syncedLyrics, details.lrcLines)}
+                                        className="p-2 rounded-xl transition-all"
+                                        style={{
+                                          background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
+                                          border: "1px solid rgba(255,255,255,0.08)",
+                                          color: "#71717a",
+                                          boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                        }}
+                                        onMouseEnter={(e) => {
+                                          (e.currentTarget as HTMLButtonElement).style.color = "#d4d4d8";
+                                          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(139,92,246,0.2)";
+                                        }}
+                                        onMouseLeave={(e) => {
+                                          (e.currentTarget as HTMLButtonElement).style.color = "#71717a";
+                                          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.08)";
+                                        }}
+                                        title="View lyrics"
+                                      >
+                                        <FileText className="h-3.5 w-3.5" />
+                                      </button>
+                                    )}
+                                    {/* Spotify deep link */}
+                                    <a
+                                      href={getSpotifyUrl(track.artist, track.title)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="p-2 rounded-xl transition-all"
+                                      style={{
+                                        background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
+                                        border: "1px solid rgba(255,255,255,0.08)",
+                                        color: "#71717a",
+                                        boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                        display: "inline-flex", alignItems: "center",
+                                      }}
+                                      onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#1db954"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(29,185,84,0.3)"; }}
+                                      onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#71717a"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
+                                      title="Open in Spotify"
+                                    >
+                                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
+                                    </a>
+                                    {/* YouTube Music deep link */}
+                                    <a
+                                      href={getYouTubeUrl(track.artist, track.title)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="p-2 rounded-xl transition-all"
+                                      style={{
+                                        background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
+                                        border: "1px solid rgba(255,255,255,0.08)",
+                                        color: "#71717a",
+                                        boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                        display: "inline-flex", alignItems: "center",
+                                      }}
+                                      onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#ff0000"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,0,0,0.3)"; }}
+                                      onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#71717a"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
+                                      title="Open in YouTube Music"
+                                    >
+                                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.376 0 0 5.376 0 12s5.376 12 12 12 12-5.376 12-12S18.624 0 12 0zm0 19.104c-3.924 0-7.104-3.18-7.104-7.104S8.076 4.896 12 4.896s7.104 3.18 7.104 7.104-3.18 7.104-7.104 7.104zm0-13.332c-3.432 0-6.228 2.796-6.228 6.228S8.568 18.228 12 18.228s6.228-2.796 6.228-6.228S15.432 5.772 12 5.772zM9.684 15.54V8.46L15.816 12l-6.132 3.54z"/></svg>
+                                    </a>
+                                  </>
                                 )}
                               </div>
                             </div>
@@ -1312,7 +1537,7 @@ export default function ChatContainer({
                   ↵ send
                 </span>
               )}
-              
+
               <div className="absolute right-2.5">
                 {input.trim() && (
                   <button
@@ -1330,78 +1555,98 @@ export default function ChatContainer({
         </div>
       </div>
 
-      {/* ─── Floating Audio Player ───────────────────────────────── */}
+
+      {/* ─── Floating Audio Player ─────────────────────────────────────── */}
       {playingTrackId && (
         <div className="fixed bottom-6 right-6 z-50 animate-scale-in" style={{
-          background: "linear-gradient(160deg, #141420 0%, #0f0f18 60%, #0c0c14 100%)",
+          background: trackDetails[playingTrackId]?.coverArtUrl
+            ? "rgba(12, 12, 18, 0.88)"
+            : "linear-gradient(160deg, #141420 0%, #0f0f18 60%, #0c0c14 100%)",
           border: "1px solid rgba(139,92,246,0.3)",
           boxShadow: "0 24px 64px rgba(0,0,0,0.8), 0 0 0 1px rgba(139,92,246,0.12), 0 0 48px rgba(139,92,246,0.12), inset 0 1px 0 rgba(255,255,255,0.08)",
           borderRadius: "22px",
           padding: "14px 16px",
           width: "300px",
+          position: "relative",
+          overflow: "hidden",
         }}>
-          {/* Top chrome strip */}
-          <div className="-mx-4 -mt-3.5 mb-3 px-4 py-1.5 rounded-t-[20px] flex items-center justify-between" style={{
-            background: "linear-gradient(180deg, rgba(255,255,255,0.06) 0%, transparent 100%)",
-            borderBottom: "1px solid rgba(255,255,255,0.05)",
-          }}>
-            <span className="text-[9px] font-mono uppercase tracking-[0.22em] text-violet-400">Now Playing</span>
-            <span className="glow-dot" />
-          </div>
 
-          <div className="flex items-center gap-3">
-            {/* Spinning vinyl album art */}
-            <div className="relative h-13 w-13 shrink-0" style={{ width: 52, height: 52 }}>
-              <div className="absolute inset-0 rounded-full" style={{
-                animation: "record-spin 4s linear infinite",
-                background: trackDetails[playingTrackId]?.coverArtUrl
-                  ? `url(${trackDetails[playingTrackId].coverArtUrl}) center/cover`
-                  : "radial-gradient(circle, #2a1a3e, #1a0a2e)",
-                boxShadow: "0 0 0 2px rgba(139,92,246,0.4), 0 0 0 4px rgba(139,92,246,0.1), 0 4px 20px rgba(0,0,0,0.7)",
-              }} />
-              {/* Center hole */}
-              <div className="absolute inset-[38%] rounded-full" style={{ background: "#08080a", border: "1px solid rgba(255,255,255,0.12)" }} />
-            </div>
-
-            <div className="min-w-0 flex-1">
-              <div className="text-xs font-bold text-zinc-100 truncate leading-tight">
-                {playingTrackId.split("||")[1].replace(/\b\w/g, c => c.toUpperCase())}
-              </div>
-              <div className="text-[10px] text-zinc-500 truncate mt-0.5">
-                {playingTrackId.split("||")[0].replace(/\b\w/g, c => c.toUpperCase())}
-              </div>
-              {/* Animated waveform bars (live heights from state) */}
-              <div className="waveform-bar-container mt-2">
-                {waveformHeights.map((h, i) => (
-                  <div key={i} className="waveform-mini-bar" style={{ height: `${h}px` }} />
-                ))}
-              </div>
-            </div>
-
-            <button
-              onClick={() => {
-                if (audioRef.current) audioRef.current.pause();
-                setPlayingTrackId(null);
-                if (waveformIntervalRef.current) {
-                  clearInterval(waveformIntervalRef.current);
-                  waveformIntervalRef.current = null;
-                }
-              }}
-              className="p-2 rounded-xl flex-shrink-0 transition-all"
+          {/* Cinematic blurred album art background */}
+          {trackDetails[playingTrackId]?.coverArtUrl && (
+            <div
+              className="cinematic-art-bg"
               style={{
-                background: "linear-gradient(135deg, #7c3aed, #8b5cf6)",
-                boxShadow: "0 0 16px rgba(139,92,246,0.6), inset 0 1px 0 rgba(255,255,255,0.25)",
-                color: "white",
+                position: "absolute", inset: 0, zIndex: 0,
+                backgroundImage: `url(${trackDetails[playingTrackId].coverArtUrl})`,
+                backgroundSize: "cover",
+                backgroundPosition: "center",
+                filter: "blur(40px) saturate(0.45) brightness(0.18)",
+                transform: "scale(1.15)",
+                pointerEvents: "none",
               }}
-              title="Stop"
-            >
-              <Pause className="h-3.5 w-3.5" />
-            </button>
+            />
+          )}
+
+          {/* Content layer — sits above the cinematic bg */}
+          <div style={{ position: "relative", zIndex: 1 }}>
+            {/* Top chrome strip */}
+            <div className="-mx-4 -mt-3.5 mb-3 px-4 py-1.5 rounded-t-[20px] flex items-center justify-between" style={{
+              background: "linear-gradient(180deg, rgba(255,255,255,0.06) 0%, transparent 100%)",
+              borderBottom: "1px solid rgba(255,255,255,0.05)",
+            }}>
+              <span className="text-[9px] font-mono uppercase tracking-[0.22em] text-violet-400">Now Playing</span>
+              <span className="glow-dot" />
+            </div>
+
+            <div className="flex items-center gap-3">
+              {/* Spinning vinyl disc with album art */}
+              <div className="relative shrink-0" style={{ width: 52, height: 52 }}>
+                <div className="absolute inset-0 rounded-full" style={{
+                  animation: "record-spin 4s linear infinite",
+                  background: trackDetails[playingTrackId]?.coverArtUrl
+                    ? `url(${trackDetails[playingTrackId].coverArtUrl}) center/cover`
+                    : "radial-gradient(circle, #2a1a3e, #1a0a2e)",
+                  boxShadow: "0 0 0 2px rgba(139,92,246,0.4), 0 0 0 4px rgba(139,92,246,0.1), 0 4px 20px rgba(0,0,0,0.7)",
+                }} />
+                <div className="absolute inset-[38%] rounded-full" style={{ background: "#08080a", border: "1px solid rgba(255,255,255,0.12)" }} />
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-zinc-100 truncate leading-tight">
+                  {playingTrackId.split("||")[1].replace(/\b\w/g, c => c.toUpperCase())}
+                </div>
+                <div className="text-[10px] text-zinc-500 truncate mt-0.5">
+                  {playingTrackId.split("||")[0].replace(/\b\w/g, c => c.toUpperCase())}
+                </div>
+                {/* Real-time Web Audio FFT canvas — replaces random waveform bars */}
+                <canvas
+                  ref={canvasCallbackRef}
+                  width={120}
+                  height={18}
+                  className="mt-2 block"
+                  style={{ borderRadius: "3px" }}
+                />
+              </div>
+
+              <button
+                onClick={stopAudio}
+                className="p-2 rounded-xl flex-shrink-0 transition-all"
+                style={{
+                  background: "linear-gradient(135deg, #7c3aed, #8b5cf6)",
+                  boxShadow: "0 0 16px rgba(139,92,246,0.6), inset 0 1px 0 rgba(255,255,255,0.25)",
+                  color: "white",
+                }}
+                title="Stop"
+              >
+                <Pause className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {/* ─── Lyrics Modal — Stage Backdrop with Line-by-Line Highlight ── */}
+
       {lyricsTrack && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{
           background: "rgba(0,0,0,0.9)",
@@ -1447,17 +1692,41 @@ export default function ChatContainer({
               </button>
             </div>
             
-            {/* Lyrics scroll area — line-by-line serif with active highlight */}
-            <div className="flex-1 overflow-y-auto py-4 px-3" style={{
-              scrollbarWidth: "thin",
-            }}>
-              {lyricsTrack.lyrics ? (
+            {/* Lyrics scroll area — 3-state karaoke with auto-scroll */}
+            <div
+              ref={lyricsScrollRef}
+              className="flex-1 overflow-y-auto py-4 px-3"
+              style={{ scrollbarWidth: "thin" }}
+            >
+              {lyricsTrack.lrcLines && lyricsTrack.lrcLines.length > 0 ? (
+                <div className="space-y-0.5">
+                  {lyricsTrack.lrcLines.map((line, idx) => (
+                    <p
+                      key={idx}
+                      className={`lyrics-line ${
+                        idx === activeLyricLine
+                          ? "lyrics-line-active"
+                          : idx === activeLyricLine + 1
+                          ? "lyrics-line-upcoming"
+                          : ""
+                      }`}
+                      onClick={() => setActiveLyricLine(idx)}
+                    >
+                      {line.text}
+                    </p>
+                  ))}
+                </div>
+              ) : lyricsTrack.lyrics ? (
                 <div className="space-y-0.5">
                   {lyricsTrack.lyrics.split("\n").filter(Boolean).map((line, idx) => (
                     <p
                       key={idx}
                       className={`lyrics-line ${
-                        idx === activeLyricLine ? "lyrics-line-active" : ""
+                        idx === activeLyricLine
+                          ? "lyrics-line-active"
+                          : idx === activeLyricLine + 1
+                          ? "lyrics-line-upcoming"
+                          : ""
                       }`}
                       onClick={() => setActiveLyricLine(idx)}
                     >
