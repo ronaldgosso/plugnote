@@ -657,3 +657,26 @@ body {
 .cinematic-art-bg {
   animation: fade-in 0.8s ease-out forwards;
 }
+
+/* ─── Embedded Lyrics inside Track Cards ─────────────────────────────────── */
+.lyrics-line-embedded {
+  font-size: 0.8rem;
+  line-height: 1.4;
+  font-weight: 500;
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 8px;
+  transition: all 0.25s ease;
+  color: rgba(255, 255, 255, 0.25);
+  font-family: var(--font-outfit), sans-serif;
+}
+.lyrics-line-embedded-active {
+  color: #c084fc !important; /* light purple purple-400 */
+  font-weight: 700;
+  background: rgba(139, 92, 246, 0.08);
+  border-left: 2px solid #a855f7;
+  padding-left: 10px;
+}
+.lyrics-line-embedded-upcoming {
+  color: rgba(255, 255, 255, 0.5);
+}

@@ -225,12 +225,6 @@ export default function ChatContainer({
   const [trackDetails, setTrackDetails] = useState<Record<string, TrackCacheItem>>({});
   const [loadingTrack, setLoadingTrack] = useState<Record<string, boolean>>({});
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null); // "artist||title"
-  const [lyricsTrack, setLyricsTrack] = useState<{
-    artist: string;
-    title: string;
-    lyrics: string | null;
-    lrcLines: LrcLine[] | null;
-  } | null>(null);
   const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>([]);
   const [activeMood, setActiveMood] = useState<string>("all");
   // Emoji reactions: messageId → reactionId
@@ -293,10 +287,10 @@ export default function ChatContainer({
     };
   }, []);
 
-  // Auto-scroll the active lyric line into view inside the lyrics modal
+  // Auto-scroll the active lyric line into view (supports both modal and inline embedded views)
   useEffect(() => {
     if (!lyricsScrollRef.current) return;
-    const activeEl = lyricsScrollRef.current.querySelector(".lyrics-line-active");
+    const activeEl = lyricsScrollRef.current.querySelector(".lyrics-line-active, .lyrics-line-embedded-active");
     if (activeEl) {
       activeEl.scrollIntoView({ behavior: "smooth", block: "center" });
     }
@@ -453,13 +447,21 @@ export default function ChatContainer({
 
   // ── Stop helper — tears down audio + visualizer cleanly
   const stopAudio = useCallback(() => {
-    if (audioRef.current) audioRef.current.pause();
+    if (audioRef.current) {
+      if (timeUpdateHandlerRef.current) {
+        audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
+        timeUpdateHandlerRef.current = null;
+      }
+      audioRef.current.pause();
+    }
+    if (lyricsIntervalRef.current) { clearInterval(lyricsIntervalRef.current); lyricsIntervalRef.current = null; }
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     if (visualizerRef.current) { visualizerRef.current.cleanup(); visualizerRef.current = null; }
     setPlayingTrackId(null);
+    lrcLinesRef.current = null;
   }, []);
 
-  // Play audio snippet — starts Web Audio visualizer
+  // Play audio snippet — starts Web Audio visualizer and triggers embedded lyrics sync
   const handlePlayPreview = async (artist: string, title: string, previewUrl: string | null) => {
     const trackId = `${artist.toLowerCase()}||${title.toLowerCase()}`;
 
@@ -487,6 +489,40 @@ export default function ChatContainer({
       drawVisualizer(viz.analyser, canvasRef.current, rafRef);
     }
 
+    // Set up synced lyrics for the playing song (embed mode)
+    const details = trackDetails[trackId];
+    if (details) {
+      const lrcLines = details.lrcLines || (details.syncedLyrics ? parseLrc(details.syncedLyrics) : null);
+      lrcLinesRef.current = lrcLines;
+      setActiveLyricLine(0);
+
+      if (lrcLines && lrcLines.length > 0) {
+        const handler = () => {
+          if (!audioRef.current || !lrcLinesRef.current) return;
+          const nowMs = audioRef.current.currentTime * 1000;
+          let idx = 0;
+          for (let i = 0; i < lrcLinesRef.current.length; i++) {
+            if (lrcLinesRef.current[i].time <= nowMs) idx = i;
+            else break;
+          }
+          setActiveLyricLine(idx);
+        };
+        timeUpdateHandlerRef.current = handler;
+        audio.addEventListener("timeupdate", handler);
+      } else if (details.lyrics) {
+        const lineCount = details.lyrics.split("\n").filter(Boolean).length;
+        lyricsIntervalRef.current = setInterval(() => {
+          setActiveLyricLine((prev) => {
+            if (prev >= lineCount - 1) {
+              if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
+              return prev;
+            }
+            return prev + 1;
+          });
+        }, 2500);
+      }
+    }
+
     audio.play().catch((err) => {
       if (err.name !== "AbortError") {
         console.error("Audio playback error:", err);
@@ -497,62 +533,7 @@ export default function ChatContainer({
     audio.onended = () => stopAudio();
   };
 
-  // Show lyrics modal — real LRC sync when syncedLyrics available, 2.5s timer as fallback
-  const handleShowLyrics = (
-    artist: string,
-    title: string,
-    lyrics: string | null,
-    syncedLyrics: string | null,
-    cachedLrcLines?: LrcLine[] | null
-  ) => {
-    // Clear any previous listeners / intervals
-    if (lyricsIntervalRef.current) { clearInterval(lyricsIntervalRef.current); lyricsIntervalRef.current = null; }
-    if (audioRef.current && timeUpdateHandlerRef.current) {
-      audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
-      timeUpdateHandlerRef.current = null;
-    }
 
-    const lrcLines = cachedLrcLines || (syncedLyrics ? parseLrc(syncedLyrics) : null);
-    lrcLinesRef.current = lrcLines;
-    setLyricsTrack({ artist, title, lyrics, lrcLines });
-    setActiveLyricLine(0);
-
-    if (lrcLines && lrcLines.length > 0 && audioRef.current) {
-      // ── Real-time LRC sync via ontimeupdate
-      const handler = () => {
-        if (!audioRef.current || !lrcLinesRef.current) return;
-        const nowMs = audioRef.current.currentTime * 1000;
-        let idx = 0;
-        for (let i = 0; i < lrcLinesRef.current.length; i++) {
-          if (lrcLinesRef.current[i].time <= nowMs) idx = i;
-          else break;
-        }
-        setActiveLyricLine(idx);
-      };
-      timeUpdateHandlerRef.current = handler;
-      audioRef.current.addEventListener("timeupdate", handler);
-    } else if (lyrics) {
-      // ── Fallback: advance a line every 2.5s
-      const lineCount = lyrics.split("\n").filter(Boolean).length;
-      lyricsIntervalRef.current = setInterval(() => {
-        setActiveLyricLine((prev) => {
-          if (prev >= lineCount - 1) { clearInterval(lyricsIntervalRef.current!); return prev; }
-          return prev + 1;
-        });
-      }, 2500);
-    }
-  };
-
-  // Close lyrics modal — clear all sync mechanisms
-  const handleCloseLyrics = () => {
-    setLyricsTrack(null);
-    lrcLinesRef.current = null;
-    if (lyricsIntervalRef.current) { clearInterval(lyricsIntervalRef.current); lyricsIntervalRef.current = null; }
-    if (audioRef.current && timeUpdateHandlerRef.current) {
-      audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
-      timeUpdateHandlerRef.current = null;
-    }
-  };
 
   // Emoji reaction handler — optimistic update + server persist
   const handleReaction = async (messageId: string, reactionId: string) => {
@@ -1271,141 +1252,181 @@ export default function ChatContainer({
                           return (
                             <div 
                               key={i}
-                              className="track-card-sleeve rounded-2xl p-3 flex items-center justify-between gap-3"
+                              className="track-card-sleeve rounded-2xl p-3 flex flex-col gap-3 transition-all duration-300"
+                              style={{
+                                border: isPlaying ? "1px solid rgba(139,92,246,0.3)" : "1px solid rgba(255,255,255,0.06)",
+                                background: isPlaying ? "linear-gradient(180deg, #101018 0%, #0a0a0f 100%)" : "linear-gradient(180deg, #15151e 0%, #0d0d14 100%)",
+                              }}
                             >
-                              <div className="flex items-center gap-3 min-w-0 flex-1">
-                                {/* Album Art — larger, record sleeve style */}
-                                <div className="relative h-14 w-14 rounded-xl shrink-0 overflow-visible">
-                                  {/* Sleeve square */}
-                                  <div className="absolute inset-0 rounded-xl overflow-hidden z-10" style={{
-                                    background: "#0a0a0d",
-                                    border: "1px solid rgba(255,255,255,0.08)",
-                                    boxShadow: "0 4px 16px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05)",
-                                  }}>
-                                    {details?.coverArtUrl ? (
-                                      <img 
-                                        src={details.coverArtUrl} 
-                                        alt={track.title} 
-                                        className="object-cover h-full w-full"
-                                      />
-                                    ) : (
-                                      <div className={`h-full w-full flex items-center justify-center ${isLoading ? "shimmer-bg" : ""}`}>
-                                        <Music2 className={`h-5 w-5 text-zinc-700 ${isLoading ? "animate-pulse" : ""}`} />
-                                      </div>
+                              <div className="flex items-center justify-between gap-3 w-full">
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                  {/* Album Art — larger, record sleeve style */}
+                                  <div className="relative h-14 w-14 rounded-xl shrink-0 overflow-visible">
+                                    {/* Sleeve square */}
+                                    <div className="absolute inset-0 rounded-xl overflow-hidden z-10" style={{
+                                      background: "#0a0a0d",
+                                      border: "1px solid rgba(255,255,255,0.08)",
+                                      boxShadow: "0 4px 16px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05)",
+                                    }}>
+                                      {details?.coverArtUrl ? (
+                                        <img 
+                                          src={details.coverArtUrl} 
+                                          alt={track.title} 
+                                          className="object-cover h-full w-full"
+                                        />
+                                      ) : (
+                                        <div className={`h-full w-full flex items-center justify-center ${isLoading ? "shimmer-bg" : ""}`}>
+                                          <Music2 className={`h-5 w-5 text-zinc-700 ${isLoading ? "animate-pulse" : ""}`} />
+                                        </div>
+                                      )}
+                                    </div>
+                                    {/* Vinyl record peeking out to the right */}
+                                    <div className="vinyl-peek" style={{ top: "50%", transform: "translateY(-50%)" }} />
+                                  </div>
+
+                                  <div className="min-w-0 flex-1">
+                                    <div className="text-xs font-bold text-zinc-200 truncate leading-tight">{track.title}</div>
+                                    <div className="text-[10px] text-zinc-500 truncate mt-0.5">{track.artist}</div>
+                                    {details?.album && (
+                                      <div className="text-[9px] text-zinc-700 truncate mt-1 font-mono uppercase tracking-wide">{details.album}</div>
                                     )}
                                   </div>
-                                  {/* Vinyl record peeking out to the right */}
-                                  <div className="vinyl-peek" style={{ top: "50%", transform: "translateY(-50%)" }} />
                                 </div>
 
-                                <div className="min-w-0 flex-1">
-                                  <div className="text-xs font-bold text-zinc-200 truncate leading-tight">{track.title}</div>
-                                  <div className="text-[10px] text-zinc-500 truncate mt-0.5">{track.artist}</div>
-                                  {details?.album && (
-                                    <div className="text-[9px] text-zinc-700 truncate mt-1 font-mono uppercase tracking-wide">{details.album}</div>
-                                  )}
-                                </div>
-                              </div>
-
-                              {/* Action buttons: Play, Lyrics, Spotify, YouTube, or loading state */}
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                {isLoading ? (
-                                  <div 
-                                    className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-violet-500/20 shimmer-bg select-none"
-                                    style={{
-                                      boxShadow: "0 0 12px rgba(139,92,246,0.1), inset 0 1px 0 rgba(255,255,255,0.02)",
-                                    }}
-                                  >
-                                    {/* Spinner & Pulsing message */}
-                                    <div className="w-3 h-3 border border-violet-400 border-t-transparent rounded-full animate-spin shrink-0" />
-                                    <span className="text-[9px] font-mono text-violet-400 font-bold uppercase tracking-wider">Syncing Preview...</span>
-                                  </div>
-                                ) : (
-                                  <>
-                                    {details?.previewUrl && (
-                                      <button
-                                        onClick={() => handlePlayPreview(track.artist, track.title, details.previewUrl)}
-                                        className="p-2 rounded-xl transition-all"
-                                        style={isPlaying ? {
-                                          background: "linear-gradient(135deg, #7c3aed, #8b5cf6)",
-                                          border: "1px solid rgba(139,92,246,0.5)",
-                                          color: "white",
-                                          boxShadow: "0 0 14px rgba(139,92,246,0.5), inset 0 1px 0 rgba(255,255,255,0.2)",
-                                        } : {
-                                          background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
-                                          border: "1px solid rgba(255,255,255,0.08)",
-                                          color: "#71717a",
-                                          boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
-                                        }}
-                                        title={isPlaying ? "Pause" : "Play 30s preview"}
-                                      >
-                                        {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-                                      </button>
-                                    )}
-                                    {details && (
-                                      <button
-                                        onClick={() => handleShowLyrics(track.artist, track.title, details.lyrics, details.syncedLyrics, details.lrcLines)}
+                                {/* Action buttons: Play, Spotify, YouTube, or loading state */}
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  {isLoading ? (
+                                    <div 
+                                      className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-violet-500/20 shimmer-bg select-none"
+                                      style={{
+                                        boxShadow: "0 0 12px rgba(139,92,246,0.1), inset 0 1px 0 rgba(255,255,255,0.02)",
+                                      }}
+                                    >
+                                      {/* Spinner & Pulsing message */}
+                                      <div className="w-3 h-3 border border-violet-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                                      <span className="text-[9px] font-mono text-violet-400 font-bold uppercase tracking-wider">Syncing...</span>
+                                    </div>
+                                  ) : (
+                                    <>
+                                      {details?.previewUrl && (
+                                        <button
+                                          onClick={() => handlePlayPreview(track.artist, track.title, details.previewUrl)}
+                                          className="p-2 rounded-xl transition-all"
+                                          style={isPlaying ? {
+                                            background: "linear-gradient(135deg, #7c3aed, #8b5cf6)",
+                                            border: "1px solid rgba(139,92,246,0.5)",
+                                            color: "white",
+                                            boxShadow: "0 0 14px rgba(139,92,246,0.5), inset 0 1px 0 rgba(255,255,255,0.2)",
+                                          } : {
+                                            background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
+                                            border: "1px solid rgba(255,255,255,0.08)",
+                                            color: "#71717a",
+                                            boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                          }}
+                                          title={isPlaying ? "Pause" : "Play 30s preview"}
+                                        >
+                                          {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                                        </button>
+                                      )}
+                                      {/* Spotify deep link */}
+                                      <a
+                                        href={getSpotifyUrl(track.artist, track.title)}
+                                        target="_blank"
+                                        rel="noreferrer"
                                         className="p-2 rounded-xl transition-all"
                                         style={{
                                           background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
                                           border: "1px solid rgba(255,255,255,0.08)",
                                           color: "#71717a",
                                           boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                          display: "inline-flex", alignItems: "center",
                                         }}
-                                        onMouseEnter={(e) => {
-                                          (e.currentTarget as HTMLButtonElement).style.color = "#d4d4d8";
-                                          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(139,92,246,0.2)";
-                                        }}
-                                        onMouseLeave={(e) => {
-                                          (e.currentTarget as HTMLButtonElement).style.color = "#71717a";
-                                          (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.08)";
-                                        }}
-                                        title="View lyrics"
+                                        onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#1db954"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(29,185,84,0.3)"; }}
+                                        onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#71717a"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
+                                        title="Open in Spotify"
                                       >
-                                        <FileText className="h-3.5 w-3.5" />
-                                      </button>
-                                    )}
-                                    {/* Spotify deep link */}
-                                    <a
-                                      href={getSpotifyUrl(track.artist, track.title)}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="p-2 rounded-xl transition-all"
-                                      style={{
-                                        background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
-                                        border: "1px solid rgba(255,255,255,0.08)",
-                                        color: "#71717a",
-                                        boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
-                                        display: "inline-flex", alignItems: "center",
-                                      }}
-                                      onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#1db954"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(29,185,84,0.3)"; }}
-                                      onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#71717a"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-                                      title="Open in Spotify"
-                                    >
-                                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
-                                    </a>
-                                    {/* YouTube Music deep link */}
-                                    <a
-                                      href={getYouTubeUrl(track.artist, track.title)}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="p-2 rounded-xl transition-all"
-                                      style={{
-                                        background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
-                                        border: "1px solid rgba(255,255,255,0.08)",
-                                        color: "#71717a",
-                                        boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
-                                        display: "inline-flex", alignItems: "center",
-                                      }}
-                                      onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#ff0000"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,0,0,0.3)"; }}
-                                      onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#71717a"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
-                                      title="Open in YouTube Music"
-                                    >
-                                      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.376 0 0 5.376 0 12s5.376 12 12 12 12-5.376 12-12S18.624 0 12 0zm0 19.104c-3.924 0-7.104-3.18-7.104-7.104S8.076 4.896 12 4.896s7.104 3.18 7.104 7.104-3.18 7.104-7.104 7.104zm0-13.332c-3.432 0-6.228 2.796-6.228 6.228S8.568 18.228 12 18.228s6.228-2.796 6.228-6.228S15.432 5.772 12 5.772zM9.684 15.54V8.46L15.816 12l-6.132 3.54z"/></svg>
-                                    </a>
-                                  </>
-                                )}
+                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
+                                      </a>
+                                      {/* YouTube Music deep link */}
+                                      <a
+                                        href={getYouTubeUrl(track.artist, track.title)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="p-2 rounded-xl transition-all"
+                                        style={{
+                                          background: "linear-gradient(180deg, #1a1a24 0%, #111118 100%)",
+                                          border: "1px solid rgba(255,255,255,0.08)",
+                                          color: "#71717a",
+                                          boxShadow: "0 1px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
+                                          display: "inline-flex", alignItems: "center",
+                                        }}
+                                        onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#ff0000"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,0,0,0.3)"; }}
+                                        onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.color = "#71717a"; (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.08)"; }}
+                                        title="Open in YouTube Music"
+                                      >
+                                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.376 0 0 5.376 0 12s5.376 12 12 12 12-5.376 12-12S18.624 0 12 0zm0 19.104c-3.924 0-7.104-3.18-7.104-7.104S8.076 4.896 12 4.896s7.104 3.18 7.104 7.104-3.18 7.104-7.104 7.104zm0-13.332c-3.432 0-6.228 2.796-6.228 6.228S8.568 18.228 12 18.228s6.228-2.796 6.228-6.228S15.432 5.772 12 5.772zM9.684 15.54V8.46L15.816 12l-6.132 3.54z"/></svg>
+                                      </a>
+                                    </>
+                                  )}
+                                </div>
                               </div>
+
+                              {/* Embedded lyrics block inside active card */}
+                              {isPlaying && details && (
+                                <div 
+                                  className="w-full mt-1 pt-2.5 border-t border-white/5 overflow-hidden transition-all duration-300 flex flex-col"
+                                >
+                                  <div className="text-[8px] font-mono uppercase tracking-wider text-violet-400/60 mb-2 flex items-center justify-between">
+                                    <span>Lyrics Sync</span>
+                                    {details.lrcLines && <span className="text-[7.5px] opacity-75">Karaoke Active</span>}
+                                  </div>
+                                  <div 
+                                    ref={lyricsScrollRef}
+                                    className="overflow-y-auto px-1 max-h-[150px] space-y-1 select-none"
+                                    style={{ scrollbarWidth: "none" }}
+                                  >
+                                    {details.lrcLines && details.lrcLines.length > 0 ? (
+                                      <div className="space-y-0.5 py-10">
+                                        {details.lrcLines.map((line, idx) => (
+                                          <p
+                                            key={idx}
+                                            className={`lyrics-line-embedded ${
+                                              idx === activeLyricLine
+                                                ? "lyrics-line-embedded-active"
+                                                : idx === activeLyricLine + 1
+                                                ? "lyrics-line-embedded-upcoming"
+                                                : ""
+                                            }`}
+                                          >
+                                            {line.text}
+                                          </p>
+                                        ))}
+                                      </div>
+                                    ) : details.lyrics ? (
+                                      <div className="space-y-0.5 py-10">
+                                        {details.lyrics.split("\n").filter(Boolean).map((line, idx) => (
+                                          <p
+                                            key={idx}
+                                            className={`lyrics-line-embedded ${
+                                              idx === activeLyricLine
+                                                ? "lyrics-line-embedded-active"
+                                                : idx === activeLyricLine + 1
+                                                ? "lyrics-line-embedded-upcoming"
+                                                : ""
+                                            }`}
+                                          >
+                                            {line}
+                                          </p>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div className="text-zinc-600 italic text-[10px] py-4 text-center">
+                                        No lyrics found in the database.
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           );
                         })}
@@ -1645,121 +1666,7 @@ export default function ChatContainer({
         </div>
       )}
 
-      {/* ─── Lyrics Modal — Stage Backdrop with Line-by-Line Highlight ── */}
 
-      {lyricsTrack && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{
-          background: "rgba(0,0,0,0.9)",
-          backdropFilter: "blur(20px)",
-        }}
-          onClick={handleCloseLyrics}
-        >
-          {/* Spotlight radial glow behind modal */}
-          <div className="absolute inset-0 pointer-events-none" style={{
-            background: "radial-gradient(ellipse 60% 40% at 50% 50%, rgba(139,92,246,0.08) 0%, transparent 70%)",
-          }} />
-
-          <div className="w-full max-w-lg max-h-[82vh] flex flex-col animate-scale-in relative"
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: "linear-gradient(180deg, #161622 0%, #0f0f1a 40%, #0a0a12 100%)",
-              border: "1px solid rgba(139,92,246,0.25)",
-              borderRadius: "28px",
-              boxShadow: "0 48px 120px rgba(0,0,0,0.9), 0 0 0 1px rgba(255,255,255,0.04), 0 0 60px rgba(139,92,246,0.1), inset 0 1px 0 rgba(255,255,255,0.08)",
-            }}>
-
-            {/* Modal chrome header */}
-            <div className="px-6 py-4 flex items-center justify-between shrink-0" style={{
-              borderBottom: "1px solid rgba(255,255,255,0.06)",
-              background: "linear-gradient(180deg, rgba(255,255,255,0.05) 0%, transparent 100%)",
-              borderRadius: "28px 28px 0 0",
-            }}>
-              <div className="min-w-0">
-                <div className="text-[9px] font-mono uppercase tracking-[0.22em] text-violet-400 mb-1">Song Lyrics</div>
-                <h2 className="text-base font-bold text-zinc-100 truncate" style={{ fontFamily: '"Playfair Display", Georgia, serif' }}>
-                  {lyricsTrack.title}
-                </h2>
-                <p className="text-xs text-zinc-500 mt-0.5 italic" style={{ fontFamily: '"Playfair Display", Georgia, serif' }}>
-                  {lyricsTrack.artist}
-                </p>
-              </div>
-              <button
-                onClick={handleCloseLyrics}
-                className="p-2 rounded-xl text-zinc-600 hover:text-zinc-300 transition-colors ml-4 shrink-0"
-                style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)" }}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            
-            {/* Lyrics scroll area — 3-state karaoke with auto-scroll */}
-            <div
-              ref={lyricsScrollRef}
-              className="flex-1 overflow-y-auto py-4 px-3"
-              style={{ scrollbarWidth: "thin" }}
-            >
-              {lyricsTrack.lrcLines && lyricsTrack.lrcLines.length > 0 ? (
-                <div className="space-y-0.5">
-                  {lyricsTrack.lrcLines.map((line, idx) => (
-                    <p
-                      key={idx}
-                      className={`lyrics-line ${
-                        idx === activeLyricLine
-                          ? "lyrics-line-active"
-                          : idx === activeLyricLine + 1
-                          ? "lyrics-line-upcoming"
-                          : ""
-                      }`}
-                      onClick={() => setActiveLyricLine(idx)}
-                    >
-                      {line.text}
-                    </p>
-                  ))}
-                </div>
-              ) : lyricsTrack.lyrics ? (
-                <div className="space-y-0.5">
-                  {lyricsTrack.lyrics.split("\n").filter(Boolean).map((line, idx) => (
-                    <p
-                      key={idx}
-                      className={`lyrics-line ${
-                        idx === activeLyricLine
-                          ? "lyrics-line-active"
-                          : idx === activeLyricLine + 1
-                          ? "lyrics-line-upcoming"
-                          : ""
-                      }`}
-                      onClick={() => setActiveLyricLine(idx)}
-                    >
-                      {line}
-                    </p>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-zinc-600 italic text-center py-12 flex flex-col items-center gap-3">
-                  <HelpCircle className="h-8 w-8 text-zinc-700" />
-                  <span style={{ fontFamily: '"Playfair Display", Georgia, serif' }}>No lyrics found in the LRCLib database for this song.</span>
-                </div>
-              )}
-            </div>
-            
-            {/* Modal footer */}
-            <div className="px-6 py-4 flex items-center justify-between shrink-0" style={{
-              borderTop: "1px solid rgba(255,255,255,0.05)",
-              borderRadius: "0 0 28px 28px",
-            }}>
-              <span className="text-[10px] font-mono text-zinc-700">
-                {lyricsTrack.lyrics ? `${lyricsTrack.lyrics.split("\n").filter(Boolean).length} lines` : ""}
-              </span>
-              <button
-                onClick={handleCloseLyrics}
-                className="px-5 py-2 text-xs font-semibold rounded-xl transition-all btn-tactile text-zinc-400 hover:text-zinc-200"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
     </div>
   );
