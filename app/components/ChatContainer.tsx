@@ -5,7 +5,7 @@ import {
   Plus, MessageSquare, Trash2, Edit2, Send, Sparkles, Settings, Play, Pause,
   FileText, Music2, AlertTriangle, Menu, X, ArrowUpRight,
   HelpCircle, Star, PanelLeftOpen, PanelLeftClose, ExternalLink,
-  Headphones, Search, Library
+  Headphones, Search, Library, Tags
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { readStreamableValue } from "ai/rsc";
@@ -14,7 +14,6 @@ import {
   sendMessage, getMessages, createConversation, deleteConversation,
   renameConversation, getConversations, getFreeTrialStatus
 } from "@/app/actions/chat";
-import { fetchTrackDetailsAction } from "@/app/actions/music";
 import { reactToMessage } from "@/app/actions/reactions";
 import { PROVIDERS_INFO, ProviderId } from "@/lib/ai";
 import { createVisualizer, drawVisualizer, type Visualizer } from "@/lib/visualizer";
@@ -262,6 +261,7 @@ export default function ChatContainer({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const lyricsScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingFetches = useRef<Map<string, Promise<void>>>(new Map());
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const typewriterIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lyricsIntervalRef     = useRef<ReturnType<typeof setInterval> | null>(null);
   // Web Audio visualizer
@@ -283,6 +283,20 @@ export default function ChatContainer({
   const timeUpdateHandlerRef = useRef<(() => void) | null>(null);
   // LRC lines ref (avoids stale closure in the timeupdate handler)
   const lrcLinesRef = useRef<LrcLine[] | null>(null);
+
+  // Cancel all pending track metadata fetches
+  const cancelAllPendingTrackFetches = useCallback(() => {
+    abortControllersRef.current.forEach((controller, key) => {
+      try {
+        controller.abort();
+      } catch (err) {
+        console.warn("Failed to abort fetch for track", key, err);
+      }
+      setLoadingTrack((prev) => ({ ...prev, [key]: false }));
+    });
+    abortControllersRef.current.clear();
+    pendingFetches.current.clear();
+  }, []);
 
   // ── Stop helper — tears down audio + visualizer cleanly
   const stopAudio = useCallback(() => {
@@ -318,6 +332,7 @@ export default function ChatContainer({
   // Cleanup audio + visualizer + intervals on unmount
   useEffect(() => {
     return () => {
+      cancelAllPendingTrackFetches();
       if (audioRef.current) audioRef.current.pause();
       if (typewriterIntervalRef.current) clearInterval(typewriterIntervalRef.current);
       if (lyricsIntervalRef.current) clearInterval(lyricsIntervalRef.current);
@@ -327,7 +342,7 @@ export default function ChatContainer({
         audioRef.current.removeEventListener("timeupdate", timeUpdateHandlerRef.current);
       }
     };
-  }, []);
+  }, [cancelAllPendingTrackFetches]);
 
   // Auto-scroll the active lyric line into view (supports both modal and inline embedded views)
   useEffect(() => {
@@ -441,9 +456,10 @@ export default function ChatContainer({
 
   useEffect(() => {
     if (viewMode === "library") {
+      cancelAllPendingTrackFetches();
       loadLibraryTracks();
     }
-  }, [viewMode, loadLibraryTracks]);
+  }, [viewMode, loadLibraryTracks, cancelAllPendingTrackFetches]);
 
   // Filter available providers based on trial or user keys — memoized
   const availableProviders = useMemo(() =>
@@ -516,10 +532,19 @@ export default function ChatContainer({
     const key = `${artist.toLowerCase()}||${title.toLowerCase()}`;
     if (trackDetails[key] || loadingTrack[key] || pendingFetches.current.has(key)) return;
 
+    const controller = new AbortController();
+    abortControllersRef.current.set(key, controller);
+
     const fetchPromise = (async () => {
       setLoadingTrack((prev) => ({ ...prev, [key]: true }));
       try {
-        const data = await fetchTrackDetailsAction(artist, title);
+        const response = await fetch(`/api/track-details?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`, {
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
         if (data) {
           setTrackDetails((prev) => ({
             ...prev,
@@ -533,11 +558,16 @@ export default function ChatContainer({
             }
           }));
         }
-      } catch (e) {
-        console.error("Failed to load track data", e);
+      } catch (e: any) {
+        if (e.name === "AbortError") {
+          console.log(`Fetch for track ${key} aborted.`);
+        } else {
+          console.error("Failed to load track data", e);
+        }
       } finally {
         setLoadingTrack((prev) => ({ ...prev, [key]: false }));
         pendingFetches.current.delete(key);
+        abortControllersRef.current.delete(key);
       }
     })();
 
@@ -701,6 +731,7 @@ export default function ChatContainer({
 
   // Select a conversation from sidebar
   const handleSelectConversation = async (id: string) => {
+    cancelAllPendingTrackFetches();
     setActiveId(id);
     setViewMode("chat");
     setStreamingMessage("");
@@ -721,6 +752,7 @@ export default function ChatContainer({
 
   // Create new conversation
   const handleNewChat = async () => {
+    cancelAllPendingTrackFetches();
     try {
       const newConv = await createConversation("New Conversation", selectedProvider);
       setViewMode("chat");
@@ -927,6 +959,20 @@ export default function ChatContainer({
         groups[moodLabel] = [];
       }
       groups[moodLabel].push(t);
+    });
+    return groups;
+  }, [libraryTracks, libraryFilterMood]);
+
+  // Group library tracks by Genre
+  const groupedByGenre = useMemo(() => {
+    const groups: Record<string, any[]> = {};
+    libraryTracks.forEach((t) => {
+      if (libraryFilterMood !== "all" && t.mood !== libraryFilterMood) return;
+      const genreLabel = t.genre ? t.genre.charAt(0).toUpperCase() + t.genre.slice(1) : "Unknown Genre";
+      if (!groups[genreLabel]) {
+        groups[genreLabel] = [];
+      }
+      groups[genreLabel].push(t);
     });
     return groups;
   }, [libraryTracks, libraryFilterMood]);
@@ -1351,6 +1397,7 @@ export default function ChatContainer({
                   {[
                     { id: "recent", label: "Recently Discovered" },
                     { id: "mood", label: "Moods" },
+                    { id: "genre", label: "Genres" },
                     { id: "artist", label: "Artists" },
                     { id: "all", label: "All Tracks" }
                   ].map((tab) => {
@@ -1460,7 +1507,12 @@ export default function ChatContainer({
                                 <div className="min-w-0">
                                   <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
                                   <p className="text-[10px] text-zinc-400 font-medium truncate mt-0.5">{track.artist}</p>
-                                  <p className="text-[8px] font-mono text-zinc-600 mt-1 uppercase tracking-wider">{track.mood} mood</p>
+                                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                    <span className="text-[8px] font-mono text-zinc-500 uppercase tracking-wider">{track.mood} mood</span>
+                                    {track.genre && (
+                                      <span className="text-[8px] font-mono text-pink-500/80 uppercase tracking-wider">• {track.genre}</span>
+                                    )}
+                                  </div>
                                 </div>
 
                                 {/* Inline Lyrics when active in carousel */}
@@ -1597,7 +1649,12 @@ export default function ChatContainer({
                                     <div className="min-w-0 flex-1 ml-5">
                                       <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
                                       <p className="text-[10px] text-zinc-400 font-medium truncate mt-0.5">{track.artist}</p>
-                                      <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-violet-950/40 text-violet-400 border border-violet-500/10 uppercase tracking-wider mt-1.5 inline-block">{track.mood}</span>
+                                      <div className="flex flex-wrap gap-1 mt-1.5">
+                                        <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-violet-950/40 text-violet-400 border border-violet-500/10 uppercase tracking-wider">{track.mood}</span>
+                                        {track.genre && (
+                                          <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-pink-950/40 text-pink-400 border border-pink-500/10 uppercase tracking-wider">{track.genre}</span>
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
 
@@ -1649,6 +1706,121 @@ export default function ChatContainer({
                             );
                           })}
                       </div>
+                    </div>
+                  )}
+
+                  {/* ───────────────── GENRE VIEW ───────────────── */}
+                  {libraryGroupBy === "genre" && (
+                    <div className="space-y-8">
+                      {Object.entries(groupedByGenre)
+                        .filter(([_, tracks]) => tracks.length > 0)
+                        .map(([genreName, tracks]) => (
+                          <div key={genreName} className="space-y-3">
+                            <h4 className="text-xs font-bold font-mono uppercase tracking-[0.2em] text-pink-400 pl-1 flex items-center gap-2">
+                              <Tags className="h-4.5 w-4.5 text-pink-500" />
+                              {genreName}
+                              <span className="text-[10px] opacity-40 font-normal font-sans tracking-normal">({tracks.length} tracks)</span>
+                            </h4>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                              {tracks.map((track) => {
+                                const trackKey = `${track.artist.toLowerCase()}||${track.title.toLowerCase()}`;
+                                const isPlaying = playingTrackId === trackKey;
+                                const details = trackDetails[trackKey];
+                                const isLoading = loadingTrack[trackKey] || false;
+
+                                return (
+                                  <div
+                                    key={track.id}
+                                    className="track-card-sleeve rounded-2xl p-3 flex flex-col gap-3 border border-white/5"
+                                    style={{
+                                      background: isPlaying ? "linear-gradient(180deg, #101018 0%, #0a0a0f 100%)" : "linear-gradient(180deg, #15151e 0%, #0d0d14 100%)",
+                                    }}
+                                  >
+                                    <div className="flex items-center justify-between gap-3 w-full">
+                                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                                        <div className="relative h-14 w-14 rounded-xl shrink-0 overflow-visible">
+                                          <div className="absolute inset-0 rounded-xl overflow-hidden z-10 bg-zinc-950 border border-white/10">
+                                            {track.coverArtUrl ? (
+                                              <img src={track.coverArtUrl} alt={track.title} className="h-full w-full object-cover" />
+                                            ) : (
+                                              <div className="h-full w-full flex items-center justify-center bg-zinc-900">
+                                                <Music2 className="h-5 w-5 text-zinc-700" />
+                                              </div>
+                                            )}
+                                          </div>
+                                          <div className="absolute top-0 right-0 h-14 w-14 rounded-full bg-zinc-950 z-0 transition-transform duration-700"
+                                            style={{
+                                              background: "repeating-radial-gradient(circle, #101010, #101010 2px, #0b0b0b 3px, #0b0b0b 4px)",
+                                              transform: isPlaying ? "translateX(24px) rotate(180deg)" : "translateX(0px)",
+                                            }}>
+                                            <div className="absolute inset-4 rounded-full border border-white/5 flex items-center justify-center bg-gradient-to-tr from-violet-600 to-pink-600">
+                                              <div className="h-2 w-2 rounded-full bg-zinc-950" />
+                                            </div>
+                                          </div>
+                                        </div>
+
+                                        <div className="min-w-0 flex-1 ml-5">
+                                          <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
+                                          <p className="text-[10px] text-zinc-400 font-medium truncate mt-0.5">{track.artist}</p>
+                                          <div className="flex flex-wrap gap-1 mt-1.5">
+                                            <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-violet-950/40 text-violet-400 border border-violet-500/10 uppercase tracking-wider">{track.mood}</span>
+                                            {track.genre && (
+                                              <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-pink-950/40 text-pink-400 border border-pink-500/10 uppercase tracking-wider">{track.genre}</span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      <button
+                                        onClick={() => handlePlayPreview(track.artist, track.title, track.previewUrl)}
+                                        className={`h-8 w-8 rounded-xl flex items-center justify-center transition-all ${
+                                          isPlaying ? "bg-pink-600 text-white" : "bg-zinc-800 text-zinc-300 hover:text-white"
+                                        }`}
+                                      >
+                                        {isLoading ? (
+                                          <span className="w-3.5 h-3.5 border-2 border-t-transparent border-white rounded-full animate-spin" />
+                                        ) : isPlaying ? (
+                                          <Pause className="h-3.5 w-3.5" />
+                                        ) : (
+                                          <Play className="h-3.5 w-3.5 ml-0.5" />
+                                        )}
+                                      </button>
+                                    </div>
+
+                                    {isPlaying && details && (
+                                      <div className="mt-3 p-3.5 rounded-xl border border-violet-500/20 bg-black/40 overflow-hidden">
+                                        <div 
+                                          ref={lyricsScrollRef}
+                                          className="overflow-y-auto px-1 max-h-[120px] space-y-1 select-none scrollbar-none"
+                                        >
+                                          {details.lrcLines && details.lrcLines.length > 0 ? (
+                                            <div className="py-6 space-y-0.5">
+                                              {details.lrcLines.map((line, idx) => (
+                                                <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                                  {line.text}
+                                                </p>
+                                              ))}
+                                            </div>
+                                          ) : details.lyrics ? (
+                                            <div className="py-6 space-y-0.5">
+                                              {details.lyrics.split("\n").filter(Boolean).map((line, idx) => (
+                                                <p key={idx} className={`lyrics-line-embedded ${idx === activeLyricLine ? "lyrics-line-embedded-active" : idx === activeLyricLine + 1 ? "lyrics-line-embedded-upcoming" : ""}`}>
+                                                  {line}
+                                                </p>
+                                              ))}
+                                            </div>
+                                          ) : (
+                                            <p className="text-[10px] text-zinc-600 italic text-center py-4">No lyrics loaded.</p>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
                     </div>
                   )}
 
@@ -1704,7 +1876,13 @@ export default function ChatContainer({
 
                                         <div className="min-w-0 flex-1 ml-5">
                                           <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
-                                          <p className="text-[8px] font-mono text-zinc-600 uppercase mt-0.5">{track.album || "Single"}</p>
+                                          <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                            <span className="text-[8px] font-mono text-zinc-550 uppercase">{track.album || "Single"}</span>
+                                            <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-violet-950/40 text-violet-400 border border-violet-500/10 uppercase tracking-wider">{track.mood}</span>
+                                            {track.genre && (
+                                              <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-pink-950/40 text-pink-400 border border-pink-500/10 uppercase tracking-wider">{track.genre}</span>
+                                            )}
+                                          </div>
                                         </div>
                                       </div>
 
@@ -1804,7 +1982,13 @@ export default function ChatContainer({
                                 <div className="min-w-0 flex-1 ml-5">
                                   <h4 className="text-xs font-bold text-zinc-100 truncate">{track.title}</h4>
                                   <p className="text-[10px] text-zinc-400 font-medium truncate mt-0.5">{track.artist}</p>
-                                  <p className="text-[8px] font-mono text-zinc-600 uppercase mt-0.5">{track.album || "Single"}</p>
+                                  <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                    <span className="text-[8px] font-mono text-zinc-550 uppercase">{track.album || "Single"}</span>
+                                    <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-violet-950/40 text-violet-400 border border-violet-500/10 uppercase tracking-wider">{track.mood}</span>
+                                    {track.genre && (
+                                      <span className="text-[8px] font-mono px-1.5 py-0.2 rounded bg-pink-950/40 text-pink-400 border border-pink-500/10 uppercase tracking-wider">{track.genre}</span>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
 
