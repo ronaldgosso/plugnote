@@ -10,6 +10,7 @@ export interface DiscoveredTrackData {
   title: string;
   artist: string;
   album: string | null;
+  genre: string | null;
   coverArtUrl: string | null;
   previewUrl: string | null;
   syncedLyrics: string | null;
@@ -28,6 +29,7 @@ export async function saveDiscoveredTrack(
     title: string;
     artist: string;
     album?: string | null;
+    genre?: string | null;
     coverArtUrl?: string | null;
     previewUrl?: string | null;
     syncedLyrics?: string | null;
@@ -54,6 +56,7 @@ export async function saveDiscoveredTrack(
         title: track.title,
         artist: track.artist,
         album: track.album || null,
+        genre: track.genre || null,
         coverArtUrl: track.coverArtUrl || null,
         previewUrl: track.previewUrl || null,
         syncedLyrics: track.syncedLyrics || null,
@@ -155,6 +158,7 @@ export async function getDiscoveredTracks(): Promise<DiscoveredTrackData[]> {
                 title: t.title,
                 artist: t.artist,
                 album: details?.album,
+                genre: details?.genre,
                 coverArtUrl: details?.coverArtUrl,
                 previewUrl: details?.previewUrl,
                 syncedLyrics: details?.syncedLyrics,
@@ -195,6 +199,7 @@ export async function getDiscoveredTracks(): Promise<DiscoveredTrackData[]> {
       title: t.title,
       artist: t.artist,
       album: t.album,
+      genre: t.genre,
       coverArtUrl: t.coverArtUrl,
       previewUrl: t.previewUrl,
       syncedLyrics: t.syncedLyrics,

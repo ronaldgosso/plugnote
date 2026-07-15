@@ -72,6 +72,7 @@ model DiscoveredTrack {
   title          String
   artist         String
   album          String?
+  genre          String?
   coverArtUrl    String?
   previewUrl     String?   // iTunes 30s preview fallback
   syncedLyrics   String?   // raw LRC format

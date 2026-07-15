@@ -2,6 +2,7 @@ export interface SongDetails {
   title: string;
   artist: string;
   album: string;
+  genre: string | null;
   coverArtUrl: string;
   previewUrl: string | null;
   /** Plain-text lyrics (fallback display when syncedLyrics is unavailable) */
@@ -39,9 +40,13 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
     let verifiedArtist = artist;
     let verifiedTrack = track;
     let verifiedAlbum = "";
+    let genre: string | null = null;
 
     try {
-      const itunesRes = await fetch(itunesUrl, { next: { revalidate: 86400 } }); // cache for 24 hours
+      const itunesRes = await fetch(itunesUrl, { 
+        next: { revalidate: 86400 },
+        signal: AbortSignal.timeout(2500)
+      }); // cache for 24 hours
       if (itunesRes.ok) {
         const data = await itunesRes.json();
         if (data.results && data.results.length > 0) {
@@ -52,6 +57,7 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
           verifiedArtist = item.artistName || artist;
           verifiedTrack = item.trackName || track;
           verifiedAlbum = item.collectionName || "";
+          genre = item.primaryGenreName || null;
         }
       }
     } catch (err) {
@@ -63,7 +69,10 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
     let syncedLyrics: string | null = null;
     try {
       const lrcUrl = `https://lrclib.net/api/get?artist=${encodeURIComponent(verifiedArtist)}&title=${encodeURIComponent(verifiedTrack)}`;
-      const lrcRes = await fetch(lrcUrl, { next: { revalidate: 86400 } });
+      const lrcRes = await fetch(lrcUrl, { 
+        next: { revalidate: 86400 },
+        signal: AbortSignal.timeout(1500)
+      });
       
       if (lrcRes.ok) {
         const lrcData = await lrcRes.json();
@@ -72,7 +81,10 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
       } else {
         // Fallback to query search
         const searchUrl = `https://lrclib.net/api/search?q=${encodeURIComponent(verifiedArtist + " " + verifiedTrack)}`;
-        const searchRes = await fetch(searchUrl, { next: { revalidate: 86400 } });
+        const searchRes = await fetch(searchUrl, { 
+          next: { revalidate: 86400 },
+          signal: AbortSignal.timeout(1500)
+        });
         if (searchRes.ok) {
           const searchData = await searchRes.json();
           if (searchData && searchData.length > 0) {
@@ -91,6 +103,7 @@ export async function getTrackDetails(artist: string, track: string): Promise<So
       title: verifiedTrack,
       artist: verifiedArtist,
       album: verifiedAlbum,
+      genre,
       coverArtUrl,
       previewUrl,
       lyrics,

@@ -215,6 +215,7 @@ export async function sendMessage(conversationId: string, content: string, provi
                 title: t.title,
                 artist: t.artist,
                 album: details?.album,
+                genre: details?.genre,
                 coverArtUrl: details?.coverArtUrl,
                 previewUrl: details?.previewUrl,
                 syncedLyrics: details?.syncedLyrics,
