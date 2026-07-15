@@ -51,7 +51,7 @@ export const PROVIDERS_INFO = {
 
 export type ProviderId = keyof typeof PROVIDERS_INFO;
 
-export function getAIModel(provider: string, decryptedKey: string | null) {
+export function getAIModel(provider: string, decryptedKey: string | null): any {
   switch (provider) {
     case "openai": {
       if (!decryptedKey) throw new Error("OpenAI API key is missing");

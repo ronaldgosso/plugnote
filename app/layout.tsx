@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Key, Info, Sparkles, Headphones } from "lucide-react";
+import { Key, Info, Headphones } from "lucide-react";
 import Link from "next/link";
 import "./globals.css";
 import { getOrCreateSession } from "@/lib/session";
@@ -79,21 +79,7 @@ export default async function RootLayout({
             </nav>
           </div>
 
-          {/* Right — Status Badge */}
-          <div className="flex items-center gap-3" suppressHydrationWarning>
-            <div
-              className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold"
-              style={{
-                background: "linear-gradient(135deg, rgba(139,92,246,0.12) 0%, rgba(236,72,153,0.06) 100%)",
-                border: "1px solid rgba(139,92,246,0.2)",
-                boxShadow: "0 0 12px rgba(139,92,246,0.1), inset 0 1px 0 rgba(255,255,255,0.06)",
-              }}
-              suppressHydrationWarning
-            >
-<Sparkles className="h-3.5 w-3.5 text-violet-400" />
-              <span className="text-violet-300">Powered by AI</span>
-            </div>
-          </div>
+
         </header>
 
         <main className="flex-1 flex flex-col min-h-0">
