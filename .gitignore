@@ -43,3 +43,9 @@ ehthumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Build artifacts
+*.tsbuildinfo
+
+# Migration lock
+.db-migrated
