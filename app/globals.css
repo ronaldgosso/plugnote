@@ -270,7 +270,6 @@ body {
 .markdown-content ul, .markdown-content ol {
   padding-left: 1.25rem;
   margin-bottom: 0.75em;
-  space-y: 0.25em;
 }
 .markdown-content li { margin-bottom: 0.25em; }
 .markdown-content li::marker { color: #8b5cf6; }

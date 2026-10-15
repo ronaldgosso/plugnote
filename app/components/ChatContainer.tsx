@@ -229,7 +229,7 @@ export default function ChatContainer({
   const [libraryTracks, setLibraryTracks] = useState<any[]>([]);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const [libraryFilterMood, setLibraryFilterMood] = useState<string>("all");
-  const [libraryGroupBy, setLibraryGroupBy] = useState<"recent" | "mood" | "artist" | "all">("recent");
+  const [libraryGroupBy, setLibraryGroupBy] = useState<"recent" | "mood" | "artist" | "all" | "genre">("recent");
   const [ytPlayerReady, setYtPlayerReady] = useState(false);
 
   // YouTube Player Ref

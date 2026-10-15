@@ -28,7 +28,7 @@ export function buildSystemPrompt(
   const parts: string[] = [];
   if (artists.length) parts.push(`Previously explored artists: ${artists.slice(0, 12).join(", ")}.`);
   if (genres.length)  parts.push(`Known genre interests: ${genres.slice(0, 8).join(", ")}.`);
-  if (moods.length)   parts.push(`Recent mood preferences: ${[...new Set(moods)].join(", ")}.`);
+  if (moods.length)   parts.push(`Recent mood preferences: ${Array.from(new Set(moods)).join(", ")}.`);
 
   return (
     SYSTEM_PROMPT +
